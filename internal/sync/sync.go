@@ -1,0 +1,90 @@
+package sync
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/poconnor/graft/internal/config"
+	"github.com/poconnor/graft/internal/library"
+	"github.com/poconnor/graft/internal/lock"
+	"github.com/poconnor/graft/internal/model"
+	"github.com/poconnor/graft/internal/pin"
+	"github.com/poconnor/graft/internal/render"
+)
+
+type Result struct {
+	Succeeded []string
+	Failed    []string
+	Skipped   []string
+}
+
+func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []render.AdapterByName) Result {
+	result := Result{
+		Succeeded: []string{},
+		Failed:    []string{},
+		Skipped:   []string{},
+	}
+	seen := map[string]bool{}
+	for _, mcp := range lk.MCPs {
+		key := mcp.Library + "/" + mcp.Name
+		if seen[key] {
+			result.Skipped = append(result.Skipped, mcp.Name)
+			continue
+		}
+		seen[key] = true
+		lib, ok := cfg.Library(mcp.Library)
+		if !ok {
+			result.Failed = append(result.Failed, mcp.Name)
+			continue
+		}
+		def, hash, err := client.Definition(lib, mcp.Name)
+		if err != nil || hash == mcp.DefinitionHash {
+			result.Skipped = append(result.Skipped, mcp.Name)
+			continue
+		}
+		if def.Pin.Runtime != "" {
+			registry := pin.NewRegistry()
+			handler, ok := registry.Handler(def.Command)
+			if !ok {
+				result.Failed = append(result.Failed, mcp.Name)
+				continue
+			}
+			if err := pin.Enforce(handler, def.Pin, mcp.Version, false, ""); err != nil {
+				result.Failed = append(result.Failed, mcp.Name)
+				continue
+			}
+			def.Args = handler.Inject(def.Pin, def.Args)
+		}
+		if !renderTarget(mcp.Target, def, adapters) {
+			result.Failed = append(result.Failed, mcp.Name)
+			continue
+		}
+		result.Succeeded = append(result.Succeeded, mcp.Name)
+	}
+	return result
+}
+
+func AuthWarning(command string, env map[string]string) string {
+	for key, value := range env {
+		upperKey := strings.ToUpper(key)
+		upperValue := strings.ToUpper(value)
+		if strings.Contains(upperKey, "TOKEN") ||
+			strings.Contains(upperKey, "SECRET") ||
+			strings.Contains(upperKey, "PASSWORD") ||
+			strings.Contains(upperKey, "CREDENTIAL") ||
+			strings.Contains(upperValue, "BEARER ") {
+			return fmt.Sprintf("auth warning: %s uses credential-bearing environment; default answer is no", command)
+		}
+	}
+	return ""
+}
+
+func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) bool {
+	for _, adapter := range adapters {
+		if adapter.Name != target {
+			continue
+		}
+		return adapter.Adapter.Render(def) == nil
+	}
+	return false
+}

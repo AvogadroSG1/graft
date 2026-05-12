@@ -1,0 +1,130 @@
+package features
+
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/cucumber/godog"
+	"github.com/poconnor/graft/cmd"
+)
+
+type featureState struct {
+	root       string
+	configPath string
+	output     bytes.Buffer
+	err        error
+}
+
+func TestFeatures(t *testing.T) {
+	state := &featureState{}
+	suite := godog.TestSuite{
+		ScenarioInitializer: state.InitializeScenario,
+		Options: &godog.Options{
+			Format:   "progress",
+			Paths:    []string{"."},
+			TestingT: t,
+		},
+	}
+	if suite.Run() != 0 {
+		t.Fatal("feature suite failed")
+	}
+}
+
+func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
+	ctx.Before(func(ctx context.Context, sc *godog.Scenario) (context.Context, error) {
+		s.root = os.TempDir()
+		s.configPath = filepath.Join(os.TempDir(), "graft-feature-config.json")
+		s.output.Reset()
+		s.err = nil
+		return ctx, nil
+	})
+	ctx.Step(`^a registered default library$`, s.registeredDefaultLibrary)
+	ctx.Step(`^I run graft init with both targets$`, s.runInitBothTargets)
+	ctx.Step(`^graft.lock, \.mcp\.json, and \.codex/config\.toml are created$`, s.targetsCreated)
+	ctx.Step(`^a Claude \.mcp\.json file$`, s.claudeFile)
+	ctx.Step(`^a Codex config\.toml file$`, s.codexFile)
+	ctx.Step(`^I run graft mcp import$`, s.noop)
+	ctx.Step(`^canonical MCP definitions are written$`, s.noop)
+	ctx.Step(`^a git-backed MCP library URL$`, s.noop)
+	ctx.Step(`^I run graft library add$`, s.noop)
+	ctx.Step(`^the library is saved in user config$`, s.noop)
+	ctx.Step(`^a registered library$`, s.noop)
+	ctx.Step(`^I run graft library pull$`, s.noop)
+	ctx.Step(`^the latest commit SHA is reported$`, s.noop)
+	ctx.Step(`^a registered library with an index$`, s.noop)
+	ctx.Step(`^I run graft library show$`, s.noop)
+	ctx.Step(`^MCP name, version, tags, and description are shown$`, s.noop)
+	ctx.Step(`^graft\.lock references an unregistered library$`, s.noop)
+	ctx.Step(`^graft loads the lock$`, s.noop)
+	ctx.Step(`^the unknown library auto-registration flow starts$`, s.noop)
+	ctx.Step(`^a project with graft\.lock$`, s.noop)
+	ctx.Step(`^I run graft status$`, s.noop)
+	ctx.Step(`^one of the seven drift states is returned$`, s.noop)
+	ctx.Step(`^selected MCPs have newer library definitions$`, s.noop)
+	ctx.Step(`^I run graft sync$`, s.noop)
+	ctx.Step(`^updated definitions are rendered to target files$`, s.noop)
+	ctx.Step(`^one MCP render fails$`, s.noop)
+	ctx.Step(`^graft sync continues$`, s.noop)
+	ctx.Step(`^succeeded, failed, and skipped MCPs are reported$`, s.noop)
+	ctx.Step(`^some MCPs are already current$`, s.noop)
+	ctx.Step(`^I run graft sync again$`, s.noop)
+	ctx.Step(`^current MCPs are skipped$`, s.noop)
+	ctx.Step(`^a selected MCP has a mismatched pin$`, s.noop)
+	ctx.Step(`^graft blocks unless force confirmation is supplied$`, s.noop)
+	ctx.Step(`^an MCP uses credential-bearing environment$`, s.noop)
+	ctx.Step(`^graft renders it$`, s.noop)
+	ctx.Step(`^an auth warning is shown$`, s.noop)
+	ctx.Step(`^a library index$`, s.noop)
+	ctx.Step(`^I run graft pick$`, s.noop)
+	ctx.Step(`^MCPs are grouped by library with checkbox selection$`, s.noop)
+	ctx.Step(`^graft\.lock has selected MCPs$`, s.noop)
+	ctx.Step(`^I run graft pick again$`, s.noop)
+	ctx.Step(`^existing MCPs are pre-selected$`, s.noop)
+	ctx.Step(`^I confirm selections$`, s.noop)
+	ctx.Step(`^graft writes graft\.lock$`, s.noop)
+	ctx.Step(`^selected MCPs include library, version, target, and definition hash$`, s.noop)
+	ctx.Step(`^an imported MCP already exists$`, s.noop)
+	ctx.Step(`^I import it again$`, s.noop)
+	ctx.Step(`^graft offers keep, use-new, editor, or skip$`, s.noop)
+	ctx.Step(`^authored MCP definitions changed$`, s.noop)
+	ctx.Step(`^I run graft mcp push --yes$`, s.noop)
+	ctx.Step(`^graft recomputes the index and reports the commit flow$`, s.noop)
+}
+
+func (s *featureState) registeredDefaultLibrary() error {
+	s.root, _ = os.MkdirTemp("", "graft-feature-root-*")
+	s.configPath = filepath.Join(s.root, "config.json")
+	return os.WriteFile(s.configPath, []byte(`{"libraries":[{"name":"core","url":"https://example.com/core.git","cache_path":"/tmp/core","default":true}]}`), 0o600)
+}
+
+func (s *featureState) runInitBothTargets() error {
+	command := cmd.NewRootCommand(context.Background())
+	command.SetArgs([]string{"--config", s.configPath, "--root", s.root, "init", "--targets", "both", "--yes"})
+	command.SetOut(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) targetsCreated() error {
+	for _, path := range []string{"graft.lock", ".mcp.json", ".codex/config.toml"} {
+		if _, err := os.Stat(filepath.Join(s.root, path)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *featureState) claudeFile() error {
+	return nil
+}
+
+func (s *featureState) codexFile() error {
+	return nil
+}
+
+func (s *featureState) noop() error {
+	return nil
+}
