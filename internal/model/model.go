@@ -1,0 +1,66 @@
+package model
+
+type Pin struct {
+	Runtime string `json:"runtime"`
+	Version string `json:"version"`
+	Hash    string `json:"hash"`
+}
+
+type AdapterConfig struct {
+	Command string            `json:"command,omitempty" toml:"command,omitempty"`
+	Args    []string          `json:"args,omitempty" toml:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty" toml:"env,omitempty"`
+}
+
+type Definition struct {
+	Name        string                   `json:"name" toml:"name"`
+	Version     string                   `json:"version" toml:"version"`
+	Description string                   `json:"description" toml:"description"`
+	Tags        []string                 `json:"tags" toml:"tags"`
+	Command     string                   `json:"command" toml:"command"`
+	Args        []string                 `json:"args" toml:"args"`
+	Env         map[string]string        `json:"env,omitempty" toml:"env,omitempty"`
+	Pin         Pin                      `json:"pin,omitempty" toml:"pin,omitempty"`
+	Adapters    map[string]AdapterConfig `json:"adapters,omitempty" toml:"adapters,omitempty"`
+}
+
+func (d Definition) Adapter(name string) AdapterConfig {
+	cfg := AdapterConfig{
+		Command: d.Command,
+		Args:    append([]string{}, d.Args...),
+		Env:     map[string]string{},
+	}
+	for key, value := range d.Env {
+		cfg.Env[key] = value
+	}
+	if d.Adapters == nil {
+		return cfg
+	}
+	override, ok := d.Adapters[name]
+	if !ok {
+		return cfg
+	}
+	if override.Command != "" {
+		cfg.Command = override.Command
+	}
+	if len(override.Args) > 0 {
+		cfg.Args = append([]string{}, override.Args...)
+	}
+	for key, value := range override.Env {
+		cfg.Env[key] = value
+	}
+	return cfg
+}
+
+type IndexEntry struct {
+	Name        string   `json:"name"`
+	Version     string   `json:"version"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	SHA256      string   `json:"sha256"`
+}
+
+type LibraryIndex struct {
+	Name string       `json:"name"`
+	MCPs []IndexEntry `json:"mcps"`
+}
