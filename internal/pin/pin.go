@@ -20,6 +20,7 @@ type Handler interface {
 	Inject(pin model.Pin, args []string) []string
 }
 
+// Registry maps runtime commands to their Handler implementations, preserving registration order.
 type Registry struct {
 	order    []string
 	handlers map[string]Handler
