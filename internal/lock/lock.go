@@ -46,6 +46,7 @@ type Lock struct {
 	MCPs      []InstalledMCP `json:"mcps"`
 }
 
+// Store abstracts reading and writing the project lock file.
 type Store interface {
 	Load(root string) (Lock, error)
 	Save(root string, lock Lock) error
