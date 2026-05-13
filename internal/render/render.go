@@ -35,6 +35,7 @@ type CodexAdapter struct {
 	root string
 }
 
+// NewClaudeAdapter returns a ClaudeAdapter that writes to <root>/.mcp.json.
 func NewClaudeAdapter(root string) ClaudeAdapter {
 	return ClaudeAdapter{root: root}
 }
