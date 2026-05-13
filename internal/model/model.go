@@ -33,6 +33,9 @@ type Definition struct {
 	Adapters    map[string]AdapterConfig `json:"adapters,omitempty" toml:"adapters,omitempty"`
 }
 
+// Adapter returns the resolved AdapterConfig for the given adapter name (e.g. "claude" or "codex").
+// The base command, args, and env are copied from the Definition, then any per-adapter
+// overrides in d.Adapters[name] are applied on top. The returned config is safe to mutate.
 func (d Definition) Adapter(name string) AdapterConfig {
 	cfg := AdapterConfig{
 		Command: d.Command,
