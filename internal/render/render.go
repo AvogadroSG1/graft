@@ -25,6 +25,7 @@ type Adapter interface {
 	TargetFile() string
 }
 
+// ClaudeAdapter implements Adapter for the Claude Code .mcp.json config file.
 type ClaudeAdapter struct {
 	root string
 }
