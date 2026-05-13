@@ -77,6 +77,9 @@ func Chain(root, name, from, to string) ([]File, error) {
 	return chain, nil
 }
 
+// Apply executes steps against doc in place. input supplies values for require_input steps.
+// When auto is true, missing inputs are skipped (pending set to true) rather than returning
+// an error. Returns (pending, error): pending is true when any require_input step lacked a value.
 func Apply(doc map[string]any, steps []Step, auto bool, input map[string]string) (bool, error) {
 	pending := false
 	for _, step := range steps {
