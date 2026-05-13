@@ -55,6 +55,7 @@ type Store interface {
 // FileStore implements Store using the filesystem.
 type FileStore struct{}
 
+// Load reads graft.lock from the project root. A missing lock file returns an empty Lock.
 func (FileStore) Load(root string) (Lock, error) {
 	path := filepath.Join(root, Filename)
 	data, err := os.ReadFile(path)
