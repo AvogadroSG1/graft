@@ -220,6 +220,8 @@ func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite boo
 	return path, nil
 }
 
+// ValidateMCPName returns an error if name contains path separators or would escape
+// the mcps/ directory via ".." traversal. Empty names are also rejected.
 func ValidateMCPName(name string) error {
 	if name == "" || name == "." || name == ".." {
 		return fmt.Errorf("invalid MCP name %q", name)
