@@ -1,5 +1,7 @@
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -destination=mock/store.go -package=mock github.com/poconnor/graft/internal/config Store
 
+// Package config manages the global graft configuration file that tracks registered MCP libraries.
+// The config file lives at ~/.config/graft/config.json (XDG-aware).
 package config
 
 import (
