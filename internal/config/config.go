@@ -123,6 +123,9 @@ func (c Config) Library(name string) (Library, bool) {
 	return Library{}, false
 }
 
+// WithLibrary returns a new Config with lib added or updated. If CachePath is empty,
+// it is set to the default cache location. The first library in the config is automatically
+// marked as the default when the config was previously empty.
 func (c Config) WithLibrary(lib Library) (Config, error) {
 	next := Config{Libraries: slices.Clone(c.Libraries)}
 	if lib.CachePath == "" {
