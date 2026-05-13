@@ -190,6 +190,8 @@ func writeToml(path string, value any) error {
 	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
 }
 
+// Targets constructs the Adapter list for the given target names ("claude", "codex").
+// Unknown names are silently ignored.
 func Targets(root string, names []string) []Adapter {
 	adapters := []Adapter{}
 	seen := map[string]bool{}
