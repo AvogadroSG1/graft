@@ -1,11 +1,13 @@
 package claudecfg
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/BurntSushi/toml"
 	"github.com/poconnor/graft/internal/render"
 )
 
@@ -124,6 +126,81 @@ func TestLoadParsesHTTPMCPsAndRedactsHeaders(t *testing.T) {
 	}
 }
 
+func TestLoadParsesRemoteMCPsAtAllScopes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	source := filepath.Join(root, "claude.json")
+	content := `{
+  "mcpServers": {
+    "global-http": {
+      "type": "http",
+      "url": "https://example.com/global",
+      "headers": {"Authorization": "Bearer global-secret"}
+    }
+  },
+  "projects": {
+    "/work/api": {
+      "mcpServers": {
+        "local-sse": {
+          "type": "sse",
+          "url": "https://example.com/local",
+          "headers": {"X-API-Key": "local-secret"}
+        }
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := `{"mcpServers":{"project-http":{"type":"http","url":"https://example.com/project","headers":{"Authorization":"Bearer project-secret"}}}}`
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(projectConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, err := Load(source, root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	want := map[string]struct {
+		transport string
+		url       string
+		headerKey string
+		headerVal string
+	}{
+		"global-http":  {transport: "http", url: "https://example.com/global", headerKey: "Authorization", headerVal: "${Authorization}"},
+		"local-sse":    {transport: "sse", url: "https://example.com/local", headerKey: "X-API-Key", headerVal: "${X-API-Key}"},
+		"project-http": {transport: "http", url: "https://example.com/project", headerKey: "Authorization", headerVal: "${Authorization}"},
+	}
+	for _, group := range groups {
+		for _, mcp := range group.MCPs {
+			expected, ok := want[mcp.Name]
+			if !ok {
+				t.Fatalf("unexpected MCP %s in groups %+v", mcp.Name, groups)
+			}
+			delete(want, mcp.Name)
+			def := mcp.Definition
+			if def.Type != expected.transport || def.URL != expected.url {
+				t.Fatalf("%s transport = (%q, %q), want (%q, %q)", mcp.Name, def.Type, def.URL, expected.transport, expected.url)
+			}
+			if def.Headers[expected.headerKey] != expected.headerVal {
+				t.Fatalf("%s headers = %+v, want %s", mcp.Name, def.Headers, expected.headerVal)
+			}
+			data, err := json.Marshal(def)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "secret") {
+				t.Fatalf("%s leaked raw secret in definition: %s", mcp.Name, data)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing remote MCPs: %+v", want)
+	}
+}
+
 func TestLoadHTTPRoundTripRendersClaudeAndCodex(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -147,15 +224,39 @@ func TestLoadHTTPRoundTripRendersClaudeAndCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(claudeData), `"headers"`) || strings.Contains(string(claudeData), "Bearer secret") {
-		t.Fatalf("Claude output did not redact headers: %s", claudeData)
+	var claudeDoc struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+			Command string            `json:"command"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(claudeData, &claudeDoc); err != nil {
+		t.Fatalf("parse Claude output: %v", err)
+	}
+	claudeServer := claudeDoc.MCPServers["remote"]
+	if claudeServer.Type != "http" || claudeServer.URL != "https://example.com/mcp" || claudeServer.Headers["Authorization"] != "${Authorization}" || claudeServer.Command != "" {
+		t.Fatalf("Claude output = %+v, want redacted HTTP transport only", claudeServer)
 	}
 	codexData, err := os.ReadFile(filepath.Join(root, ".codex", "config.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(codexData), `type = "http"`) || strings.Contains(string(codexData), "Bearer secret") {
-		t.Fatalf("Codex output missing transport or leaked secret: %s", codexData)
+	var codexDoc struct {
+		MCPServers map[string]struct {
+			Type    string            `toml:"type"`
+			URL     string            `toml:"url"`
+			Headers map[string]string `toml:"headers"`
+			Command string            `toml:"command"`
+		} `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(string(codexData), &codexDoc); err != nil {
+		t.Fatalf("parse Codex output: %v", err)
+	}
+	codexServer := codexDoc.MCPServers["remote"]
+	if codexServer.Type != "http" || codexServer.URL != "https://example.com/mcp" || codexServer.Command != "" || codexServer.Headers != nil {
+		t.Fatalf("Codex output = %+v, want HTTP type/url only", codexServer)
 	}
 }
 

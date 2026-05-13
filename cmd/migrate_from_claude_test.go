@@ -302,3 +302,65 @@ func TestLibraryMigrateFromClaudeProjectPromptApproveAllOnStderr(t *testing.T) {
 		}
 	}
 }
+
+func TestLibraryMigrateFromClaudeIncludesRemoteMCPsInApprovalFlow(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(root, "cache"))
+	configPath := filepath.Join(root, "config.json")
+	source := filepath.Join(root, "claude.json")
+	content := `{
+  "mcpServers": {
+    "global-http": {
+      "type": "http",
+      "url": "https://example.com/global",
+      "headers": {"Authorization": "Bearer global-secret"}
+    }
+  },
+  "projects": {
+    "/work/api": {
+      "mcpServers": {
+        "local-sse": {
+          "type": "sse",
+          "url": "https://example.com/local",
+          "headers": {"X-API-Key": "local-secret"}
+        }
+      }
+    }
+  }
+}`
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectConfig := `{"mcpServers":{"project-http":{"type":"http","url":"https://example.com/project","headers":{"Authorization":"Bearer project-secret"}}}}`
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(projectConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := NewRootCommand(context.Background())
+	var errOut bytes.Buffer
+	command.SetErr(&errOut)
+	command.SetIn(strings.NewReader("a\na\n"))
+	command.SetArgs([]string{"--config", configPath, "--root", root, "library", "migrate-from-claude", "imported", "--from", source})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(errOut.String(), "Import local-sse from /work/api? [y/n/a]") || !strings.Contains(errOut.String(), "Import project-http from .mcp.json? [y/n/a]") {
+		t.Fatalf("stderr missing remote prompts: %s", errOut.String())
+	}
+	cachePath := filepath.Join(root, "cache", "graft", "libraries", "imported", "mcps")
+	for _, name := range []string{"global-http", "local-sse", "project-http"} {
+		data, err := os.ReadFile(filepath.Join(cachePath, name+".json"))
+		if err != nil {
+			t.Fatalf("read %s definition: %v", name, err)
+		}
+		if strings.Contains(string(data), "secret") {
+			t.Fatalf("%s definition leaked raw secret: %s", name, data)
+		}
+		if !strings.Contains(string(data), `"url": "https://example.com/`) {
+			t.Fatalf("%s definition missing URL: %s", name, data)
+		}
+	}
+}

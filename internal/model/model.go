@@ -10,8 +10,9 @@ type Pin struct {
 	Hash    string `json:"hash"`
 }
 
-// AdapterConfig holds the command invocation for a specific AI tool adapter.
-// When present in a Definition's Adapters map, it overrides the top-level Command/Args/Env.
+// AdapterConfig holds tool-specific stdio or remote transport settings.
+// When present in a Definition's Adapters map, it overrides the top-level
+// Type/Command/Args/Env/URL/Headers values.
 type AdapterConfig struct {
 	Type    string            `json:"type,omitempty" toml:"type,omitempty"`
 	Command string            `json:"command,omitempty" toml:"command,omitempty"`
@@ -22,8 +23,9 @@ type AdapterConfig struct {
 }
 
 // Definition describes a single MCP server stored in a library. It is serialized
-// as JSON under mcps/<name>.json in the library repository. The Command and Args fields
-// provide the default invocation; per-adapter overrides live in Adapters.
+// as JSON under mcps/<name>.json in the library repository. Command/Args/Env
+// provide the default stdio invocation; Type/URL/Headers describe remote transports.
+// Per-adapter overrides live in Adapters.
 type Definition struct {
 	Name        string                   `json:"name" toml:"name"`
 	Version     string                   `json:"version" toml:"version"`
@@ -40,7 +42,7 @@ type Definition struct {
 }
 
 // Adapter returns the resolved AdapterConfig for the given adapter name (e.g. "claude" or "codex").
-// The base command, args, and env are copied from the Definition, then any per-adapter
+// The base transport fields are copied from the Definition, then any per-adapter
 // overrides in d.Adapters[name] are applied on top. The returned config is safe to mutate.
 func (d Definition) Adapter(name string) AdapterConfig {
 	cfg := AdapterConfig{
