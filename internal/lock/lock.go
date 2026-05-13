@@ -116,6 +116,7 @@ func (l Lock) Library(name string) (LibraryRef, bool) {
 	return LibraryRef{}, false
 }
 
+// MCP returns the InstalledMCP with the given name, or false if not found.
 func (l Lock) MCP(name string) (InstalledMCP, bool) {
 	for _, mcp := range l.MCPs {
 		if mcp.Name == name {
