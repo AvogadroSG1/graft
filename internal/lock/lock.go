@@ -97,6 +97,7 @@ func HashBytes(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashFile reads path and returns the SHA256 hex digest of its contents.
 func HashFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
