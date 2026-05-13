@@ -10,6 +10,8 @@ import (
 	"github.com/poconnor/graft/internal/model"
 )
 
+// PickModel is the Bubbletea model for the interactive MCP picker.
+// Navigate with arrow keys or j/k; toggle selection with space; confirm with enter; quit with q or ctrl+c.
 type PickModel struct {
 	Items    []model.IndexEntry
 	Selected map[string]bool
