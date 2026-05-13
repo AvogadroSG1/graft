@@ -47,6 +47,7 @@ func ExitCode(err error) int {
 	return 1
 }
 
+// NewRootCommand builds and returns the fully-wired graft command tree.
 func NewRootCommand(ctx context.Context) *cobra.Command {
 	opts := &appOptions{root: "."}
 	root := &cobra.Command{
