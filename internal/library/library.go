@@ -97,6 +97,8 @@ func (GitClient) Index(lib config.Library) (model.LibraryIndex, error) {
 	return index, nil
 }
 
+// Definition reads and parses a single MCP definition from the library's mcps/ directory.
+// Returns the definition, its SHA256 hash, and any error.
 func (GitClient) Definition(lib config.Library, name string) (model.Definition, string, error) {
 	if err := ValidateMCPName(name); err != nil {
 		return model.Definition{}, "", err
