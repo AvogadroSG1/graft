@@ -189,6 +189,9 @@ func WriteDefinition(lib config.Library, def model.Definition) (string, error) {
 	return WriteDefinitionFile(lib, def, false)
 }
 
+// WriteDefinitionFile writes def to mcps/<name>.json in the library cache. When overwrite is false
+// and the file already exists, it returns an error instructing the caller to resolve the conflict.
+// Returns the absolute path of the written file.
 func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite bool) (string, error) {
 	if def.Name == "" {
 		return "", fmt.Errorf("definition name is required")
