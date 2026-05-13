@@ -1,5 +1,7 @@
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -destination=mock/store.go -package=mock github.com/poconnor/graft/internal/lock Store
 
+// Package lock manages the per-project graft.lock file that records which libraries
+// and MCP definitions are pinned for a project.
 package lock
 
 import (
