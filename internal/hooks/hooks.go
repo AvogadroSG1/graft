@@ -41,6 +41,8 @@ func InstallShellHook(rcPath string) error {
 	return err
 }
 
+// InstallPostCheckout writes a graft-managed post-checkout hook to <gitDir>/hooks/post-checkout.
+// Returns an error if a hook file exists and was not written by graft (to avoid overwriting user hooks).
 func InstallPostCheckout(gitDir string) error {
 	path := filepath.Join(gitDir, "hooks", "post-checkout")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
