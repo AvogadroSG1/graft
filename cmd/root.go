@@ -3,8 +3,8 @@
 package cmd
 
 import (
-	"context"
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
