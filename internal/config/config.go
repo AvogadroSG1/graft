@@ -113,6 +113,7 @@ func (c Config) DefaultLibrary() (Library, bool) {
 	return c.Libraries[0], true
 }
 
+// Library returns the library with the given name, or false if not found.
 func (c Config) Library(name string) (Library, bool) {
 	for _, lib := range c.Libraries {
 		if lib.Name == name {
