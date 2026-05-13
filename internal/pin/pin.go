@@ -102,6 +102,7 @@ func (NPMHandler) Inject(pin model.Pin, args []string) []string {
 	return next
 }
 
+// DockerHandler enforces Docker image pins using sha256 image digests.
 type DockerHandler struct{}
 
 var digestPattern = regexp.MustCompile(`^sha256:[a-fA-F0-9]{64}$`)
