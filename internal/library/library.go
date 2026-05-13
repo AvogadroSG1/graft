@@ -169,6 +169,57 @@ func (c GitClient) gitSHA(ctx context.Context, path string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// InitLocal initializes a local git-backed library cache. When force is true,
+// the existing cache directory is removed before initialization.
+func (c GitClient) InitLocal(ctx context.Context, lib config.Library, force bool) error {
+	if err := ValidateMCPName(lib.Name); err != nil {
+		return err
+	}
+	if lib.CachePath == "" {
+		return fmt.Errorf("library %q requires cache path", lib.Name)
+	}
+	if force {
+		if err := os.RemoveAll(lib.CachePath); err != nil {
+			return fmt.Errorf("remove existing library cache: %w", err)
+		}
+	} else if _, err := os.Stat(lib.CachePath); err == nil {
+		return fmt.Errorf("library cache %q already exists; pass --force to recreate", lib.CachePath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check library cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(lib.CachePath, "mcps"), 0o700); err != nil {
+		return fmt.Errorf("create library cache: %w", err)
+	}
+	if err := c.runGit(ctx, lib.CachePath, "init"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CommitAll stages all library files and creates a git commit with message.
+func (c GitClient) CommitAll(ctx context.Context, cachePath, message string) error {
+	if err := c.runGit(ctx, cachePath, "add", "."); err != nil {
+		return err
+	}
+	return c.runGit(ctx, cachePath, "-c", "user.name=graft", "-c", "user.email=graft@example.invalid", "commit", "-m", message)
+}
+
+func (c GitClient) runGit(ctx context.Context, path string, args ...string) error {
+	gitCtx, cancel := c.commandContext(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(gitCtx, c.gitPath(), append([]string{"-C", path}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		}
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, message)
+	}
+	return nil
+}
+
 func (c GitClient) gitPath() string {
 	if c.GitPath != "" {
 		return c.GitPath
