@@ -51,3 +51,46 @@ func TestCodexAdapterRender(t *testing.T) {
 		t.Fatalf("rendered config = %s, want docs section", data)
 	}
 }
+
+func TestAdaptersRenderHTTPTransportWithoutStdioFields(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	def := model.Definition{
+		Name:    "remote",
+		Type:    "http",
+		URL:     "https://example.com/mcp",
+		Headers: map[string]string{"Authorization": "${AUTH_TOKEN}"},
+		Command: "npx",
+		Args:    []string{"should-not-render"},
+		Env:     map[string]string{"TOKEN": "${TOKEN}"},
+	}
+	if err := NewClaudeAdapter(root).Render(def); err != nil {
+		t.Fatalf("Claude Render() error = %v", err)
+	}
+	claudeData, err := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude := string(claudeData)
+	if !strings.Contains(claude, `"type": "http"`) || !strings.Contains(claude, `"url": "https://example.com/mcp"`) {
+		t.Fatalf("Claude render missing transport fields: %s", claude)
+	}
+	if strings.Contains(claude, "should-not-render") || strings.Contains(claude, `"command"`) {
+		t.Fatalf("Claude render included stdio fields for HTTP server: %s", claude)
+	}
+
+	if err := NewCodexAdapter(root).Render(def); err != nil {
+		t.Fatalf("Codex Render() error = %v", err)
+	}
+	codexData, err := os.ReadFile(filepath.Join(root, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex := string(codexData)
+	if !strings.Contains(codex, `type = "http"`) || !strings.Contains(codex, `url = "https://example.com/mcp"`) {
+		t.Fatalf("Codex render missing transport fields: %s", codex)
+	}
+	if strings.Contains(codex, "should-not-render") || strings.Contains(codex, "command") {
+		t.Fatalf("Codex render included stdio fields for HTTP server: %s", codex)
+	}
+}

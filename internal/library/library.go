@@ -254,6 +254,9 @@ func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite boo
 	if def.Env == nil {
 		def.Env = map[string]string{}
 	}
+	if def.Headers == nil {
+		def.Headers = map[string]string{}
+	}
 	path := filepath.Join(lib.CachePath, "mcps", def.Name+".json")
 	if _, err := os.Stat(path); err == nil && !overwrite {
 		return "", fmt.Errorf("MCP %q already exists; choose keep/use-new/editor/skip", def.Name)
@@ -295,6 +298,9 @@ func NormalizeDefinition(def *model.Definition) {
 	if def.Env == nil {
 		def.Env = map[string]string{}
 	}
+	if def.Headers == nil {
+		def.Headers = map[string]string{}
+	}
 	if def.Adapters == nil {
 		def.Adapters = map[string]model.AdapterConfig{}
 	}
@@ -323,6 +329,9 @@ func importClaude(path string) ([]model.Definition, error) {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -337,14 +346,20 @@ func importClaude(path string) ([]model.Definition, error) {
 			Name:        name,
 			Version:     time.Now().UTC().Format("20060102150405"),
 			Description: "Imported from Claude MCP JSON",
+			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
 			Env:         cloneMap(server.Env),
+			URL:         server.URL,
+			Headers:     cloneMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"claude": {
+					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
 					Env:     cloneMap(server.Env),
+					URL:     server.URL,
+					Headers: cloneMap(server.Headers),
 				},
 			},
 		})
@@ -359,6 +374,9 @@ func importCodex(path string) ([]model.Definition, error) {
 			Command string            `toml:"command"`
 			Args    []string          `toml:"args"`
 			Env     map[string]string `toml:"env"`
+			Type    string            `toml:"type"`
+			URL     string            `toml:"url"`
+			Headers map[string]string `toml:"headers"`
 		} `toml:"mcp_servers"`
 	}
 	if _, err := toml.DecodeFile(path, &doc); err != nil {
@@ -373,14 +391,20 @@ func importCodex(path string) ([]model.Definition, error) {
 			Name:        name,
 			Version:     time.Now().UTC().Format("20060102150405"),
 			Description: "Imported from Codex TOML",
+			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
 			Env:         cloneMap(server.Env),
+			URL:         server.URL,
+			Headers:     cloneMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"codex": {
+					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
 					Env:     cloneMap(server.Env),
+					URL:     server.URL,
+					Headers: cloneMap(server.Headers),
 				},
 			},
 		})

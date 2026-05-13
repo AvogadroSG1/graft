@@ -50,6 +50,8 @@ type rawServer struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
 	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
 }
 
 const importedVersion = "0.1.0"
@@ -130,6 +132,22 @@ func mcpsFromServers(servers map[string]rawServer, description string) []MCP {
 	for _, name := range names {
 		server := servers[name]
 		if server.Type != "" && server.Type != "stdio" {
+			def := model.Definition{
+				Name:        name,
+				Version:     importedVersion,
+				Description: description,
+				Type:        server.Type,
+				URL:         server.URL,
+				Headers:     placeholderMap(server.Headers),
+				Adapters: map[string]model.AdapterConfig{
+					"claude": {
+						Type:    server.Type,
+						URL:     server.URL,
+						Headers: placeholderMap(server.Headers),
+					},
+				},
+			}
+			mcps = append(mcps, MCP{Name: name, Definition: def})
 			continue
 		}
 		if server.Command == "" {

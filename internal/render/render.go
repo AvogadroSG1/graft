@@ -59,9 +59,12 @@ func (a ClaudeAdapter) Render(mcp model.Definition) error {
 		return fmt.Errorf("refusing to overwrite unmanaged Claude MCP %q", mcp.Name)
 	}
 	doc.MCPServers[mcp.Name] = claudeServer{
-		Command: cfg.Command,
-		Args:    cfg.Args,
-		Env:     cfg.Env,
+		Type:    remoteType(cfg.Type),
+		Command: stdioCommand(cfg),
+		Args:    stdioArgs(cfg),
+		Env:     stdioEnv(cfg),
+		URL:     remoteURL(cfg),
+		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
 	return writeJSON(a.TargetFile(), doc)
@@ -83,9 +86,12 @@ type claudeDoc struct {
 }
 
 type claudeServer struct {
-	Command string            `json:"command"`
+	Type    string            `json:"type,omitempty"`
+	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 	Managed bool              `json:"_graft_managed,omitempty"`
 }
 
@@ -124,9 +130,12 @@ func (a CodexAdapter) Render(mcp model.Definition) error {
 		return fmt.Errorf("refusing to overwrite unmanaged Codex MCP %q", mcp.Name)
 	}
 	doc.MCPServers[mcp.Name] = codexServer{
-		Command: cfg.Command,
-		Args:    cfg.Args,
-		Env:     cfg.Env,
+		Type:    remoteType(cfg.Type),
+		Command: stdioCommand(cfg),
+		Args:    stdioArgs(cfg),
+		Env:     stdioEnv(cfg),
+		URL:     remoteURL(cfg),
+		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
 	return writeToml(a.TargetFile(), doc)
@@ -148,10 +157,55 @@ type codexDoc struct {
 }
 
 type codexServer struct {
-	Command string            `toml:"command"`
+	Command string            `toml:"command,omitempty"`
 	Args    []string          `toml:"args,omitempty"`
 	Env     map[string]string `toml:"env,omitempty"`
+	Type    string            `toml:"type,omitempty"`
+	URL     string            `toml:"url,omitempty"`
+	Headers map[string]string `toml:"headers,omitempty"`
 	Managed bool              `toml:"_graft_managed,omitempty"`
+}
+
+func stdioCommand(cfg model.AdapterConfig) string {
+	if remoteType(cfg.Type) != "" {
+		return ""
+	}
+	return cfg.Command
+}
+
+func stdioArgs(cfg model.AdapterConfig) []string {
+	if remoteType(cfg.Type) != "" {
+		return nil
+	}
+	return cfg.Args
+}
+
+func stdioEnv(cfg model.AdapterConfig) map[string]string {
+	if remoteType(cfg.Type) != "" {
+		return nil
+	}
+	return cfg.Env
+}
+
+func remoteType(value string) string {
+	if value == "" || value == "stdio" {
+		return ""
+	}
+	return value
+}
+
+func remoteURL(cfg model.AdapterConfig) string {
+	if remoteType(cfg.Type) == "" {
+		return ""
+	}
+	return cfg.URL
+}
+
+func remoteHeaders(cfg model.AdapterConfig) map[string]string {
+	if remoteType(cfg.Type) == "" {
+		return nil
+	}
+	return cfg.Headers
 }
 
 func readCodex(path string) (codexDoc, error) {

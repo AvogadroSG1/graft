@@ -3,7 +3,10 @@ package claudecfg
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/poconnor/graft/internal/render"
 )
 
 func TestLoadGroupsGlobalLocalAndProjectStdioMCPs(t *testing.T) {
@@ -85,6 +88,74 @@ func TestLoadSkipsCommandlessServersInStdioOnlyMode(t *testing.T) {
 	}
 	if len(groups) != 0 {
 		t.Fatalf("Load() = %+v, want commandless MCP skipped", groups)
+	}
+}
+
+func TestLoadParsesHTTPMCPsAndRedactsHeaders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	source := filepath.Join(root, "claude.json")
+	content := `{
+  "mcpServers": {
+    "remote": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer secret"}
+    }
+  }
+}`
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	groups, err := Load(source, root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].MCPs) != 1 {
+		t.Fatalf("Load() = %+v, want one HTTP MCP", groups)
+	}
+	def := groups[0].MCPs[0].Definition
+	if def.Type != "http" || def.URL != "https://example.com/mcp" {
+		t.Fatalf("definition transport = (%q, %q), want HTTP URL", def.Type, def.URL)
+	}
+	if def.Headers["Authorization"] != "${Authorization}" {
+		t.Fatalf("headers = %+v, want placeholder", def.Headers)
+	}
+}
+
+func TestLoadHTTPRoundTripRendersClaudeAndCodex(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	source := filepath.Join(root, "claude.json")
+	content := `{"mcpServers":{"remote":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer secret"}}}}`
+	if err := os.WriteFile(source, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := Load(source, root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	def := groups[0].MCPs[0].Definition
+	if err := render.NewClaudeAdapter(root).Render(def); err != nil {
+		t.Fatalf("Claude Render() error = %v", err)
+	}
+	if err := render.NewCodexAdapter(root).Render(def); err != nil {
+		t.Fatalf("Codex Render() error = %v", err)
+	}
+	claudeData, err := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(claudeData), `"headers"`) || strings.Contains(string(claudeData), "Bearer secret") {
+		t.Fatalf("Claude output did not redact headers: %s", claudeData)
+	}
+	codexData, err := os.ReadFile(filepath.Join(root, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexData), `type = "http"`) || strings.Contains(string(codexData), "Bearer secret") {
+		t.Fatalf("Codex output missing transport or leaked secret: %s", codexData)
 	}
 }
 
