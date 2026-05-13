@@ -79,6 +79,8 @@ func (FileStore) Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// Save writes cfg to path atomically. If path is empty, DefaultPath is used.
+// Parent directories are created with 0700 permissions.
 func (FileStore) Save(path string, cfg Config) error {
 	if path == "" {
 		var err error
