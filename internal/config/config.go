@@ -30,6 +30,7 @@ type Config struct {
 	Libraries []Library `json:"libraries"`
 }
 
+// Store abstracts reading and writing the global config file.
 type Store interface {
 	Load(path string) (Config, error)
 	Save(path string, cfg Config) error
