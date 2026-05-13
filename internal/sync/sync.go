@@ -20,6 +20,9 @@ type Result struct {
 	Skipped   []string
 }
 
+// Apply iterates over the MCPs in the lock file, fetches each definition from the library,
+// enforces pins, and renders the result via the appropriate adapter. Each MCP ends up in
+// exactly one of Succeeded, Failed, or Skipped (already up-to-date or duplicate).
 func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []render.AdapterByName) Result {
 	result := Result{
 		Succeeded: []string{},
