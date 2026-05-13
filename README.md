@@ -19,6 +19,11 @@ Initialized graft.lock
 $ graft library add team-tools https://github.com/acme/mcp-library.git
 Cloned team-tools → ~/.config/graft/cache/team-tools
 
+# Or migrate existing Claude MCP config into a local library
+$ graft library migrate-from-claude personal-tools --dry-run
+global-docs    global      would import
+local-db       /work/api   would prompt
+
 # Interactively pick MCPs to add to your project
 $ graft pick
 # (TUI opens — select definitions, confirm)
@@ -71,10 +76,12 @@ graft writes MCP definitions into `.mcp.json` (Claude Code) and `.codex/config.t
 
 - **Git-backed libraries** — MCP server definitions are stored in plain git repositories; `graft library add` clones them locally and `graft library pull` fast-forwards to the latest.
 - **Multi-tool output** — A single sync writes both `.mcp.json` (Claude Code) and `.codex/config.toml` (Codex), keeping both tools in sync from one source of truth.
+- **Remote MCP transports** — Definitions can model stdio, SSE, and HTTP MCP servers. Claude output includes remote `type`, `url`, and redacted `headers`; Codex output writes remote `type` and `url`.
 - **Drift detection** — `graft status` compares your project's lock file against the library and reports one of six states: `uninitialized`, `initialized`, `configured`, `drifted`, `pending_input`, or `unknown_library`. Pass `--quiet` to get a non-zero exit code when drift is present (useful in CI).
 - **Reproducible pins** — The `graft.lock` file records sha512 integrity hashes (npm), sha256 digests (Docker), and sha256 hashes (uvx) so every teammate gets identical server versions.
 - **Interactive TUI** — `graft pick` opens a Bubbletea-powered terminal UI to browse and select MCP definitions from all registered libraries.
 - **Import from existing configs** — `graft mcp import --from <file>` reads an existing `.mcp.json` or `.codex/config.toml` and migrates definitions into the library.
+- **Migrate from Claude** — `graft library migrate-from-claude <name>` creates a local git-backed library from `~/.claude.json` or `$CLAUDE_CONFIG_DIR/claude.json`. Global MCPs import automatically; project-scoped MCPs use `[y/n/a]` prompts; env and header values are stored as placeholders.
 - **Automatic hooks** — `graft install-hooks` adds a `cd` alias to your shell rc file and a `post-checkout` git hook so drift is checked automatically when you switch directories or branches.
 - **JSON output** — `graft status --json` and `graft library show --json` emit machine-readable output for scripting and CI pipelines.
 - **XDG-aware config** — The global config lives at `~/.config/graft/config.json` (respects `$XDG_CONFIG_HOME`).

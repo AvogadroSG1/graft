@@ -59,9 +59,12 @@ func (a ClaudeAdapter) Render(mcp model.Definition) error {
 		return fmt.Errorf("refusing to overwrite unmanaged Claude MCP %q", mcp.Name)
 	}
 	doc.MCPServers[mcp.Name] = claudeServer{
-		Command: cfg.Command,
-		Args:    cfg.Args,
-		Env:     cfg.Env,
+		Type:    remoteType(cfg.Type),
+		Command: stdioCommand(cfg),
+		Args:    stdioArgs(cfg),
+		Env:     stdioEnv(cfg),
+		URL:     remoteURL(cfg),
+		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
 	return writeJSON(a.TargetFile(), doc)
@@ -83,9 +86,12 @@ type claudeDoc struct {
 }
 
 type claudeServer struct {
-	Command string            `json:"command"`
+	Type    string            `json:"type,omitempty"`
+	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 	Managed bool              `json:"_graft_managed,omitempty"`
 }
 
@@ -124,12 +130,14 @@ func (a CodexAdapter) Render(mcp model.Definition) error {
 		return fmt.Errorf("refusing to overwrite unmanaged Codex MCP %q", mcp.Name)
 	}
 	doc.MCPServers[mcp.Name] = codexServer{
-		Command: cfg.Command,
-		Args:    cfg.Args,
-		Env:     cfg.Env,
+		Type:    remoteType(cfg.Type),
+		Command: stdioCommand(cfg),
+		Args:    stdioArgs(cfg),
+		Env:     stdioEnv(cfg),
+		URL:     remoteURL(cfg),
 		Managed: true,
 	}
-	return writeToml(a.TargetFile(), doc)
+	return writeCodex(a.TargetFile(), doc)
 }
 
 func (a CodexAdapter) Remove(name string) error {
@@ -140,26 +148,74 @@ func (a CodexAdapter) Remove(name string) error {
 	if existing, ok := doc.MCPServers[name]; ok && existing.Managed {
 		delete(doc.MCPServers, name)
 	}
-	return writeToml(a.TargetFile(), doc)
+	return writeCodex(a.TargetFile(), doc)
 }
 
 type codexDoc struct {
 	MCPServers map[string]codexServer `toml:"mcp_servers"`
+	raw        map[string]any
 }
 
 type codexServer struct {
-	Command string            `toml:"command"`
+	Command string            `toml:"command,omitempty"`
 	Args    []string          `toml:"args,omitempty"`
 	Env     map[string]string `toml:"env,omitempty"`
+	Type    string            `toml:"type,omitempty"`
+	URL     string            `toml:"url,omitempty"`
 	Managed bool              `toml:"_graft_managed,omitempty"`
 }
 
+func stdioCommand(cfg model.AdapterConfig) string {
+	if remoteType(cfg.Type) != "" {
+		return ""
+	}
+	return cfg.Command
+}
+
+func stdioArgs(cfg model.AdapterConfig) []string {
+	if remoteType(cfg.Type) != "" {
+		return nil
+	}
+	return cfg.Args
+}
+
+func stdioEnv(cfg model.AdapterConfig) map[string]string {
+	if remoteType(cfg.Type) != "" {
+		return nil
+	}
+	return cfg.Env
+}
+
+func remoteType(value string) string {
+	if value == "" || value == "stdio" {
+		return ""
+	}
+	return value
+}
+
+func remoteURL(cfg model.AdapterConfig) string {
+	if remoteType(cfg.Type) == "" {
+		return ""
+	}
+	return cfg.URL
+}
+
+func remoteHeaders(cfg model.AdapterConfig) map[string]string {
+	if remoteType(cfg.Type) == "" {
+		return nil
+	}
+	return cfg.Headers
+}
+
 func readCodex(path string) (codexDoc, error) {
-	doc := codexDoc{MCPServers: map[string]codexServer{}}
+	doc := codexDoc{MCPServers: map[string]codexServer{}, raw: map[string]any{}}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return doc, nil
 	}
 	if _, err := toml.DecodeFile(path, &doc); err != nil {
+		return doc, fmt.Errorf("parse codex config %q: %w", path, err)
+	}
+	if _, err := toml.DecodeFile(path, &doc.raw); err != nil {
 		return doc, fmt.Errorf("parse codex config %q: %w", path, err)
 	}
 	if doc.MCPServers == nil {
@@ -179,12 +235,16 @@ func writeJSON(path string, value any) error {
 	return fileutil.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
-func writeToml(path string, value any) error {
+func writeCodex(path string, doc codexDoc) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create target dir: %w", err)
 	}
+	if doc.raw == nil {
+		doc.raw = map[string]any{}
+	}
+	doc.raw["mcp_servers"] = doc.MCPServers
 	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(value); err != nil {
+	if err := toml.NewEncoder(&buf).Encode(doc.raw); err != nil {
 		return err
 	}
 	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)

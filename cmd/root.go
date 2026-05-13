@@ -3,13 +3,16 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/poconnor/graft/internal/claudecfg"
 	"github.com/poconnor/graft/internal/config"
 	"github.com/poconnor/graft/internal/fileutil"
 	"github.com/poconnor/graft/internal/hooks"
@@ -124,7 +127,13 @@ func newInitCommand(opts *appOptions) *cobra.Command {
 
 func newLibraryCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	cmd := &cobra.Command{Use: "library", Short: "Manage MCP libraries", Args: cobra.NoArgs}
-	cmd.AddCommand(newLibraryAddCommand(ctx, opts), newLibraryListCommand(opts), newLibraryPullCommand(ctx, opts), newLibraryShowCommand(opts))
+	cmd.AddCommand(
+		newLibraryAddCommand(ctx, opts),
+		newLibraryListCommand(opts),
+		newLibraryPullCommand(ctx, opts),
+		newLibraryShowCommand(opts),
+		newLibraryMigrateFromClaudeCommand(ctx, opts),
+	)
 	return cmd
 }
 
@@ -272,6 +281,180 @@ func newLibraryShowCommand(opts *appOptions) *cobra.Command {
 	cmd.Flags().StringVar(&tag, "tag", "", "filter by tag")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
 	return cmd
+}
+
+func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+	var from string
+	var force bool
+	var dryRun bool
+	cmd := &cobra.Command{
+		Use:   "migrate-from-claude <name>",
+		Short: "Create a library from Claude MCP configuration",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			source := from
+			if source == "" {
+				var err error
+				source, err = claudecfg.DefaultPath()
+				if err != nil {
+					return err
+				}
+			}
+			groups, err := claudecfg.Load(source, opts.root)
+			if err != nil {
+				return err
+			}
+			if dryRun {
+				return printClaudeMigrationDryRun(cmd, groups)
+			}
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			cfg, lib, err := prepareLocalLibraryConfig(cfg, args[0])
+			if err != nil {
+				return err
+			}
+			client := library.GitClient{}
+			if err := client.InitLocal(ctx, lib, force); err != nil {
+				return err
+			}
+			approved, err := approveClaudeMCPs(cmd, groups)
+			if err != nil {
+				return err
+			}
+			for _, mcp := range approved {
+				if _, err := library.WriteDefinition(lib, mcp.Definition); err != nil {
+					return err
+				}
+				if err := printf(cmd, "imported %s\n", mcp.Name); err != nil {
+					return err
+				}
+			}
+			if _, err := client.Reindex(lib); err != nil {
+				return err
+			}
+			if err := client.CommitAll(ctx, lib.CachePath, "Initial import from ~/.claude.json"); err != nil {
+				return err
+			}
+			if err := saveConfig(opts.configPath, cfg); err != nil {
+				return err
+			}
+			return printf(cmd, "registered %s at %s\n", lib.Name, lib.CachePath)
+		},
+	}
+	cmd.Flags().StringVar(&from, "from", "", "source Claude config file")
+	cmd.Flags().BoolVar(&force, "force", false, "wipe existing library cache before import")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview imports without prompting or writing")
+	return cmd
+}
+
+func printClaudeMigrationDryRun(cmd *cobra.Command, groups []claudecfg.Group) error {
+	for _, group := range groups {
+		for _, mcp := range group.MCPs {
+			action := "would prompt"
+			if group.Scope == claudecfg.ScopeGlobal {
+				action = "would import"
+			}
+			if err := printf(cmd, "%s\t%s\t%s\n", mcp.Name, group.Name, action); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func prepareLocalLibraryConfig(cfg config.Config, name string) (config.Config, config.Library, error) {
+	if err := library.ValidateMCPName(name); err != nil {
+		return cfg, config.Library{}, err
+	}
+	if existing, ok := cfg.Library(name); ok {
+		if existing.CachePath == "" {
+			next, err := cfg.WithLibrary(existing)
+			if err != nil {
+				return cfg, config.Library{}, err
+			}
+			existing, _ = next.Library(name)
+			cfg = next
+		}
+		if existing.URL == "" {
+			existing.URL = existing.CachePath
+			next, err := cfg.WithLibrary(existing)
+			if err != nil {
+				return cfg, config.Library{}, err
+			}
+			existing, _ = next.Library(name)
+			cfg = next
+		}
+		return cfg, existing, nil
+	}
+	next, err := cfg.WithLibrary(config.Library{Name: name})
+	if err != nil {
+		return cfg, config.Library{}, err
+	}
+	lib, ok := next.Library(name)
+	if !ok {
+		return cfg, config.Library{}, fmt.Errorf("library %q was not registered", name)
+	}
+	lib.URL = lib.CachePath
+	next, err = next.WithLibrary(lib)
+	if err != nil {
+		return cfg, config.Library{}, err
+	}
+	lib, _ = next.Library(name)
+	return next, lib, nil
+}
+
+func approveClaudeMCPs(cmd *cobra.Command, groups []claudecfg.Group) ([]claudecfg.MCP, error) {
+	approved := []claudecfg.MCP{}
+	seen := map[string]string{}
+	reader := bufio.NewReader(cmd.InOrStdin())
+	for _, group := range groups {
+		approveAll := group.Scope == claudecfg.ScopeGlobal
+		for _, mcp := range group.MCPs {
+			if prior, ok := seen[mcp.Name]; ok {
+				if err := eprintf(cmd, "warning: skipping duplicate MCP %s from %s; already imported from %s\n", mcp.Name, group.Name, prior); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if !approveAll {
+				choice, err := promptApproval(cmd, reader, group.Name, mcp.Name)
+				if err != nil {
+					return nil, err
+				}
+				switch choice {
+				case "a":
+					approveAll = true
+				case "y":
+				default:
+					continue
+				}
+			}
+			approved = append(approved, mcp)
+			seen[mcp.Name] = group.Name
+		}
+	}
+	return approved, nil
+}
+
+func promptApproval(cmd *cobra.Command, reader *bufio.Reader, groupName, mcpName string) (string, error) {
+	for {
+		if err := eprintf(cmd, "Import %s from %s? [y/n/a] ", mcpName, groupName); err != nil {
+			return "", err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		choice := strings.ToLower(strings.TrimSpace(line))
+		if choice == "y" || choice == "n" || choice == "a" {
+			return choice, nil
+		}
+		if err == io.EOF && choice == "" {
+			return "", fmt.Errorf("approval required for %s", mcpName)
+		}
+	}
 }
 
 func newMCPCommand(ctx context.Context, opts *appOptions) *cobra.Command {
@@ -572,6 +755,11 @@ func writeValue(cmd *cobra.Command, jsonOutput bool, value any) error {
 
 func printf(cmd *cobra.Command, format string, args ...any) error {
 	_, err := fmt.Fprintf(cmd.OutOrStdout(), format, args...)
+	return err
+}
+
+func eprintf(cmd *cobra.Command, format string, args ...any) error {
+	_, err := fmt.Fprintf(cmd.ErrOrStderr(), format, args...)
 	return err
 }
 

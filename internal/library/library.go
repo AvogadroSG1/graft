@@ -169,6 +169,57 @@ func (c GitClient) gitSHA(ctx context.Context, path string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// InitLocal initializes a local git-backed library cache. When force is true,
+// the existing cache directory is removed before initialization.
+func (c GitClient) InitLocal(ctx context.Context, lib config.Library, force bool) error {
+	if err := ValidateMCPName(lib.Name); err != nil {
+		return err
+	}
+	if lib.CachePath == "" {
+		return fmt.Errorf("library %q requires cache path", lib.Name)
+	}
+	if force {
+		if err := os.RemoveAll(lib.CachePath); err != nil {
+			return fmt.Errorf("remove existing library cache: %w", err)
+		}
+	} else if _, err := os.Stat(lib.CachePath); err == nil {
+		return fmt.Errorf("library cache %q already exists; pass --force to recreate", lib.CachePath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("check library cache: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Join(lib.CachePath, "mcps"), 0o700); err != nil {
+		return fmt.Errorf("create library cache: %w", err)
+	}
+	if err := c.runGit(ctx, lib.CachePath, "init"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CommitAll stages all library files and creates a git commit with message.
+func (c GitClient) CommitAll(ctx context.Context, cachePath, message string) error {
+	if err := c.runGit(ctx, cachePath, "add", "."); err != nil {
+		return err
+	}
+	return c.runGit(ctx, cachePath, "-c", "user.name=graft", "-c", "user.email=graft@example.invalid", "commit", "-m", message)
+}
+
+func (c GitClient) runGit(ctx context.Context, path string, args ...string) error {
+	gitCtx, cancel := c.commandContext(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(gitCtx, c.gitPath(), append([]string{"-C", path}, args...)...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		}
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, message)
+	}
+	return nil
+}
+
 func (c GitClient) gitPath() string {
 	if c.GitPath != "" {
 		return c.GitPath
@@ -202,6 +253,9 @@ func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite boo
 	NormalizeDefinition(&def)
 	if def.Env == nil {
 		def.Env = map[string]string{}
+	}
+	if def.Headers == nil {
+		def.Headers = map[string]string{}
 	}
 	path := filepath.Join(lib.CachePath, "mcps", def.Name+".json")
 	if _, err := os.Stat(path); err == nil && !overwrite {
@@ -244,6 +298,9 @@ func NormalizeDefinition(def *model.Definition) {
 	if def.Env == nil {
 		def.Env = map[string]string{}
 	}
+	if def.Headers == nil {
+		def.Headers = map[string]string{}
+	}
 	if def.Adapters == nil {
 		def.Adapters = map[string]model.AdapterConfig{}
 	}
@@ -272,6 +329,9 @@ func importClaude(path string) ([]model.Definition, error) {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -286,14 +346,20 @@ func importClaude(path string) ([]model.Definition, error) {
 			Name:        name,
 			Version:     time.Now().UTC().Format("20060102150405"),
 			Description: "Imported from Claude MCP JSON",
+			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
-			Env:         cloneMap(server.Env),
+			Env:         placeholderMap(server.Env),
+			URL:         server.URL,
+			Headers:     placeholderMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"claude": {
+					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
-					Env:     cloneMap(server.Env),
+					Env:     placeholderMap(server.Env),
+					URL:     server.URL,
+					Headers: placeholderMap(server.Headers),
 				},
 			},
 		})
@@ -308,6 +374,9 @@ func importCodex(path string) ([]model.Definition, error) {
 			Command string            `toml:"command"`
 			Args    []string          `toml:"args"`
 			Env     map[string]string `toml:"env"`
+			Type    string            `toml:"type"`
+			URL     string            `toml:"url"`
+			Headers map[string]string `toml:"headers"`
 		} `toml:"mcp_servers"`
 	}
 	if _, err := toml.DecodeFile(path, &doc); err != nil {
@@ -322,14 +391,20 @@ func importCodex(path string) ([]model.Definition, error) {
 			Name:        name,
 			Version:     time.Now().UTC().Format("20060102150405"),
 			Description: "Imported from Codex TOML",
+			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
-			Env:         cloneMap(server.Env),
+			Env:         placeholderMap(server.Env),
+			URL:         server.URL,
+			Headers:     placeholderMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"codex": {
+					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
-					Env:     cloneMap(server.Env),
+					Env:     placeholderMap(server.Env),
+					URL:     server.URL,
+					Headers: placeholderMap(server.Headers),
 				},
 			},
 		})
@@ -338,10 +413,14 @@ func importCodex(path string) ([]model.Definition, error) {
 	return defs, nil
 }
 
-func cloneMap(source map[string]string) map[string]string {
+func placeholderMap(source map[string]string) map[string]string {
 	next := map[string]string{}
 	for key, value := range source {
-		next[key] = value
+		if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+			next[key] = value
+			continue
+		}
+		next[key] = "${" + key + "}"
 	}
 	return next
 }

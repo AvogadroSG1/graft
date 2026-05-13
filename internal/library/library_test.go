@@ -55,3 +55,58 @@ func TestImportFileCodexTOML(t *testing.T) {
 		t.Fatalf("ImportFile() = %+v, want docs Codex definition", defs)
 	}
 }
+
+func TestImportFileParsesHTTPTransports(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	claudePath := filepath.Join(root, "mcp.json")
+	claudeContent := `{"mcpServers":{"remote":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"${AUTH_TOKEN}"}}}}`
+	if err := os.WriteFile(claudePath, []byte(claudeContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeDefs, err := ImportFile(claudePath)
+	if err != nil {
+		t.Fatalf("ImportFile(claude) error = %v", err)
+	}
+	if len(claudeDefs) != 1 || claudeDefs[0].Type != "http" || claudeDefs[0].URL != "https://example.com/mcp" {
+		t.Fatalf("Claude import = %+v, want HTTP definition", claudeDefs)
+	}
+	if claudeDefs[0].Headers["Authorization"] != "${AUTH_TOKEN}" {
+		t.Fatalf("Claude headers = %+v", claudeDefs[0].Headers)
+	}
+
+	codexPath := filepath.Join(root, "config.toml")
+	codexContent := "[mcp_servers.remote]\ntype = \"sse\"\nurl = \"https://example.com/sse\"\n"
+	if err := os.WriteFile(codexPath, []byte(codexContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codexDefs, err := ImportFile(codexPath)
+	if err != nil {
+		t.Fatalf("ImportFile(codex) error = %v", err)
+	}
+	if len(codexDefs) != 1 || codexDefs[0].Type != "sse" || codexDefs[0].URL != "https://example.com/sse" {
+		t.Fatalf("Codex import = %+v, want SSE definition", codexDefs)
+	}
+}
+
+func TestImportFileRedactsLiteralHeaderAndEnvValues(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	content := `{"mcpServers":{"remote":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer real-secret"},"env":{"TOKEN":"real-token"}}}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := ImportFile(path)
+	if err != nil {
+		t.Fatalf("ImportFile() error = %v", err)
+	}
+
+	def := defs[0]
+	if def.Headers["Authorization"] != "${Authorization}" || def.Env["TOKEN"] != "${TOKEN}" {
+		t.Fatalf("ImportFile() did not redact literals: headers=%+v env=%+v", def.Headers, def.Env)
+	}
+	if def.Adapters["claude"].Headers["Authorization"] != "${Authorization}" || def.Adapters["claude"].Env["TOKEN"] != "${TOKEN}" {
+		t.Fatalf("ImportFile() did not redact adapter literals: %+v", def.Adapters["claude"])
+	}
+}
