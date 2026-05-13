@@ -30,6 +30,7 @@ type ClaudeAdapter struct {
 	root string
 }
 
+// CodexAdapter implements Adapter for the OpenAI Codex .codex/config.toml config file.
 type CodexAdapter struct {
 	root string
 }
