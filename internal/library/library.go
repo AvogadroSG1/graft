@@ -413,14 +413,6 @@ func importCodex(path string) ([]model.Definition, error) {
 	return defs, nil
 }
 
-func cloneMap(source map[string]string) map[string]string {
-	next := map[string]string{}
-	for key, value := range source {
-		next[key] = value
-	}
-	return next
-}
-
 func placeholderMap(source map[string]string) map[string]string {
 	next := map[string]string{}
 	for key, value := range source {

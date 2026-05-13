@@ -235,17 +235,6 @@ func writeJSON(path string, value any) error {
 	return fileutil.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
-func writeToml(path string, value any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("create target dir: %w", err)
-	}
-	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(value); err != nil {
-		return err
-	}
-	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
-}
-
 func writeCodex(path string, doc codexDoc) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create target dir: %w", err)
