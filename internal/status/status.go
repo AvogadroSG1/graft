@@ -39,6 +39,8 @@ type Result struct {
 	Details []string `json:"details"`
 }
 
+// Resolve computes the current drift state of the project at root. index maps library
+// names to their current LibraryIndex; pass an empty map to skip hash comparisons.
 func Resolve(root string, cfg config.Config, lk lock.Lock, index map[string]model.LibraryIndex) Result {
 	if _, err := os.Stat(filepath.Join(root, lock.Filename)); os.IsNotExist(err) {
 		return Result{State: StateUninitialized, Details: []string{"graft.lock not found"}}
