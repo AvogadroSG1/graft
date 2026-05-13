@@ -183,6 +183,8 @@ func (c GitClient) commandContext(ctx context.Context) (context.Context, context
 	return context.WithTimeout(ctx, c.Timeout)
 }
 
+// WriteDefinition writes def to the library's mcps/<name>.json. Returns an error if the file
+// already exists; use WriteDefinitionFile with overwrite=true to replace it.
 func WriteDefinition(lib config.Library, def model.Definition) (string, error) {
 	return WriteDefinitionFile(lib, def, false)
 }
