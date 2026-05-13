@@ -81,6 +81,7 @@ func (c GitClient) Pull(ctx context.Context, lib config.Library) (string, error)
 	return sha, nil
 }
 
+// Index reads and parses the library.json index from the local clone of lib.
 func (GitClient) Index(lib config.Library) (model.LibraryIndex, error) {
 	data, err := os.ReadFile(filepath.Join(lib.CachePath, "library.json"))
 	if err != nil {
