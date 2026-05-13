@@ -23,6 +23,7 @@ import (
 	"github.com/poconnor/graft/internal/model"
 )
 
+// Client abstracts the git operations needed to interact with an MCP library repository.
 type Client interface {
 	Add(ctx context.Context, lib config.Library) error
 	Pull(ctx context.Context, lib config.Library) (string, error)
