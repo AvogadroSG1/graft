@@ -64,6 +64,8 @@ func (d Definition) Adapter(name string) AdapterConfig {
 	return cfg
 }
 
+// IndexEntry is the lightweight summary of a Definition stored in the library index.
+// The SHA256 field is the hash of the full definition JSON, used to detect drift.
 type IndexEntry struct {
 	Name        string   `json:"name"`
 	Version     string   `json:"version"`
