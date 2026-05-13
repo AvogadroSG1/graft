@@ -207,6 +207,7 @@ func Targets(root string, names []string) []Adapter {
 	return adapters
 }
 
+// SortedTargetNames returns a sorted copy of names for deterministic output.
 func SortedTargetNames(names []string) []string {
 	cp := append([]string{}, names...)
 	sort.Strings(cp)
