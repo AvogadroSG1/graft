@@ -106,6 +106,7 @@ func HashFile(path string) (string, error) {
 	return HashBytes(data), nil
 }
 
+// Library returns the LibraryRef with the given name, or false if not found.
 func (l Lock) Library(name string) (LibraryRef, bool) {
 	for _, lib := range l.Libraries {
 		if lib.Name == name {
