@@ -10,6 +10,8 @@ type Pin struct {
 	Hash    string `json:"hash"`
 }
 
+// AdapterConfig holds the command invocation for a specific AI tool adapter.
+// When present in a Definition's Adapters map, it overrides the top-level Command/Args/Env.
 type AdapterConfig struct {
 	Command string            `json:"command,omitempty" toml:"command,omitempty"`
 	Args    []string          `json:"args,omitempty" toml:"args,omitempty"`
