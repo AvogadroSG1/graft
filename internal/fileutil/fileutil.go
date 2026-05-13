@@ -1,3 +1,4 @@
+// Package fileutil provides atomic file write utilities.
 package fileutil
 
 import (
