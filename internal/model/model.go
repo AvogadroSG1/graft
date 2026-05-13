@@ -18,6 +18,9 @@ type AdapterConfig struct {
 	Env     map[string]string `json:"env,omitempty" toml:"env,omitempty"`
 }
 
+// Definition describes a single MCP server stored in a library. It is serialized
+// as JSON under mcps/<name>.json in the library repository. The Command and Args fields
+// provide the default invocation; per-adapter overrides live in Adapters.
 type Definition struct {
 	Name        string                   `json:"name" toml:"name"`
 	Version     string                   `json:"version" toml:"version"`
