@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `graft library migrate-from-claude <name>` command to create a local git-backed library from Claude MCP configuration with dry-run, force recreation, scoped prompts, duplicate handling, and env/header placeholder redaction.
+- SSE and HTTP MCP transport fields across definitions, imports, Claude/Codex render adapters, and Claude-config migration.
+
+### Changed
+
+- Codex rendering preserves unrelated existing TOML settings while updating managed MCP entries.
+- Existing config imports redact literal env and header values into placeholders before writing library definitions.
+
 ## [0.1.0] - 2026-05-13
 
 ### Added

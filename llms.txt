@@ -18,6 +18,7 @@ graft solves the problem of keeping MCP server definitions consistent across pro
 ```
 graft init                              Initialize graft in the current project (creates graft.lock)
 graft library add <name> <url>          Clone and register a git-backed MCP library
+graft library migrate-from-claude <name> Create a local library from Claude config (--from, --force, --dry-run)
 graft library list                      List all registered libraries
 graft library pull [name]               Fast-forward one or all libraries to latest
 graft library show [name] [mcp]         Show library index or a single MCP definition (--tag, --json)
@@ -40,10 +41,11 @@ graft pick                              Interactive TUI to browse and select MCP
 | `cmd/` | Cobra command tree — root command, subcommands, flag wiring |
 | `internal/config` | Reads and writes `~/.config/graft/config.json`; manages registered library records |
 | `internal/lock` | Reads and writes `graft.lock`; tracks pinned library refs and MCP selections per project |
-| `internal/library` | Git operations for library management: clone, pull, index, read definitions |
-| `internal/model` | Shared domain types: `Pin`, MCP definition structs |
+| `internal/claudecfg` | Parses Claude global/local/project MCP config for deterministic library migration with secret placeholders |
+| `internal/library` | Git operations for library management: clone, pull, local init/commit, index, read/import definitions |
+| `internal/model` | Shared domain types: `Pin`, MCP definition structs, stdio/SSE/HTTP transport fields |
 | `internal/pin` | Enforces reproducible version pins — validates sha512 (npm), sha256 digest (Docker), sha256 hash (uvx) |
-| `internal/render` | Writes resolved MCP definitions into `.mcp.json` and `.codex/config.toml` |
+| `internal/render` | Writes resolved stdio/SSE/HTTP MCP definitions into `.mcp.json` and `.codex/config.toml` |
 | `internal/status` | Computes and reports project drift state |
 | `internal/sync` | Orchestrates a full sync: resolves pins, calls render, updates lock |
 | `internal/migrate` | Parses existing `.mcp.json` and `.codex/config.toml` files for import |
@@ -60,6 +62,13 @@ graft pick                              Interactive TUI to browse and select MCP
 | `<project>/graft.lock` | Per-project lock file; pins library refs and selected MCP definitions |
 | `<project>/.mcp.json` | Claude Code MCP server config (written by `graft sync`) |
 | `<project>/.codex/config.toml` | OpenAI Codex MCP server config (written by `graft sync`) |
+
+## Transport and Migration Notes
+
+- Empty `type` and explicit `stdio` definitions render as stdio `command`/`args`/`env`.
+- Remote `sse` and `http` definitions use `url`; Claude render also writes redacted `headers`.
+- `graft library migrate-from-claude` redacts env and header values as `${KEY}` placeholders before writing library JSON or committing the local library.
+- `graft mcp import --from` also placeholder-redacts literal env/header values from imported Claude JSON or Codex TOML.
 
 ## Build and Test
 
