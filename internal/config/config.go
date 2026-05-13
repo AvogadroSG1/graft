@@ -36,6 +36,7 @@ type Store interface {
 	Save(path string, cfg Config) error
 }
 
+// FileStore implements Store using the filesystem.
 type FileStore struct{}
 
 func DefaultPath() (string, error) {
