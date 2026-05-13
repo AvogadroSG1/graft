@@ -78,6 +78,7 @@ func (FileStore) Load(root string) (Lock, error) {
 	return parsed, nil
 }
 
+// Save writes lock to graft.lock in root atomically.
 func (FileStore) Save(root string, lock Lock) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("create lock dir: %w", err)
