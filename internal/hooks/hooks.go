@@ -59,6 +59,9 @@ func InstallPostCheckout(gitDir string) error {
 	return fileutil.AtomicWriteFile(path, []byte(content), 0o755)
 }
 
+// Uninstall removes the graft-managed block from rcPath and deletes the post-checkout hook
+// if it contains only the graft-owned content. Mixed hooks (user + graft) are left intact
+// with an error rather than silently deleting user-authored lines.
 func Uninstall(rcPath, gitDir string) error {
 	if err := removeShellBlock(rcPath); err != nil {
 		return err
