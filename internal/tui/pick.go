@@ -19,6 +19,8 @@ type PickModel struct {
 	Done     bool
 }
 
+// NewPickModel creates a PickModel with items pre-populated and the names in selected
+// already checked.
 func NewPickModel(items []model.IndexEntry, selected []string) PickModel {
 	state := map[string]bool{}
 	for _, name := range selected {
