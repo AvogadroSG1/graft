@@ -140,6 +140,7 @@ func looksLikeImage(value string) bool {
 	return strings.Contains(value, "/") || strings.Contains(value, ":")
 }
 
+// UVHandler enforces uvx/uv package version pins using sha256 hashes.
 type UVHandler struct{}
 
 func (UVHandler) Detect(command string) bool {
