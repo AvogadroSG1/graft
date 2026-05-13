@@ -1,3 +1,5 @@
+// Package hooks installs and uninstalls the shell rc alias and git post-checkout hook
+// that run "graft status --quiet" automatically when entering a directory or checking out a branch.
 package hooks
 
 import (
