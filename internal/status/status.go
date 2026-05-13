@@ -1,3 +1,5 @@
+// Package status computes the drift state of a project by comparing the lock file
+// against the active library indexes and rendered config files.
 package status
 
 import (
