@@ -40,6 +40,7 @@ type InstalledMCP struct {
 	PendingInput   bool   `json:"pending_input,omitempty"`
 }
 
+// Lock is the root of the graft.lock file for a project.
 type Lock struct {
 	Libraries []LibraryRef   `json:"libraries"`
 	MCPs      []InstalledMCP `json:"mcps"`
