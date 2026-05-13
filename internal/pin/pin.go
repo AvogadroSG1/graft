@@ -76,6 +76,7 @@ func Enforce(handler Handler, pin model.Pin, installedVersion string, force bool
 	return nil
 }
 
+// NPMHandler enforces npm/npx/node package version pins using sha512 integrity hashes.
 type NPMHandler struct{}
 
 func (NPMHandler) Detect(command string) bool {
