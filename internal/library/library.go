@@ -115,6 +115,8 @@ func (GitClient) Definition(lib config.Library, name string) (model.Definition, 
 	return def, lock.HashBytes(data), nil
 }
 
+// Reindex scans mcps/*.json in the local clone, rebuilds the library.json index, and
+// writes it atomically. Returns the updated index.
 func (GitClient) Reindex(lib config.Library) (model.LibraryIndex, error) {
 	dir := filepath.Join(lib.CachePath, "mcps")
 	entries, err := os.ReadDir(dir)
