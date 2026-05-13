@@ -13,6 +13,7 @@ import (
 	"github.com/poconnor/graft/internal/model"
 )
 
+// Handler validates and injects pin information for a specific runtime.
 type Handler interface {
 	Detect(command string) bool
 	Validate(pin model.Pin, installedVersion string) error
