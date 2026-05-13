@@ -13,6 +13,7 @@ import (
 	"github.com/poconnor/graft/internal/render"
 )
 
+// Result summarises the outcome of a sync operation.
 type Result struct {
 	Succeeded []string
 	Failed    []string
