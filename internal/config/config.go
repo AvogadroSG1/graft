@@ -25,6 +25,7 @@ type Library struct {
 	Default   bool   `json:"default"`
 }
 
+// Config is the root of the graft global configuration.
 type Config struct {
 	Libraries []Library `json:"libraries"`
 }
