@@ -29,6 +29,7 @@ type appOptions struct {
 	root       string
 }
 
+// Execute runs the root command and returns any error. Called from main.
 func Execute(ctx context.Context) error {
 	cmd := NewRootCommand(ctx)
 	return cmd.ExecuteContext(ctx)
