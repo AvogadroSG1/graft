@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 )
 
+// AtomicWriteFile writes data to path using a write-to-temp-then-rename strategy,
+// so the destination is never left in a partially-written state on failure.
+// Parent directories are created automatically with 0755 permissions.
 func AtomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
