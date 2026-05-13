@@ -13,15 +13,23 @@ import (
 	"github.com/poconnor/graft/internal/model"
 )
 
+// State describes the drift relationship between a project's lock file and its rendered configs.
 type State string
 
 const (
-	StateUninitialized  State = "uninitialized"
-	StateInitialized    State = "initialized"
-	StateConfigured     State = "configured"
-	StateDrifted        State = "drifted"
-	StatePinMismatch    State = "pinmismatch"
-	StatePendingInput   State = "pending_input"
+	// StateUninitialized means graft.lock does not exist in the project root.
+	StateUninitialized State = "uninitialized"
+	// StateInitialized means graft.lock exists but no MCPs have been selected yet.
+	StateInitialized State = "initialized"
+	// StateConfigured means all selected MCPs match the current library definitions.
+	StateConfigured State = "configured"
+	// StateDrifted means at least one MCP definition has changed in the library since the last sync.
+	StateDrifted State = "drifted"
+	// StatePinMismatch means a pinned version does not match what is installed.
+	StatePinMismatch State = "pinmismatch"
+	// StatePendingInput means at least one MCP requires user-provided environment values.
+	StatePendingInput State = "pending_input"
+	// StateUnknownLibrary means the lock file references a library not registered in the config.
 	StateUnknownLibrary State = "unknown_library"
 )
 
