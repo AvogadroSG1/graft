@@ -40,6 +40,7 @@ func NewClaudeAdapter(root string) ClaudeAdapter {
 	return ClaudeAdapter{root: root}
 }
 
+// NewCodexAdapter returns a CodexAdapter that writes to <root>/.codex/config.toml.
 func NewCodexAdapter(root string) CodexAdapter {
 	return CodexAdapter{root: root}
 }
