@@ -168,6 +168,7 @@ func deletePath(doc map[string]any, path string) {
 	delete(current, parts[len(parts)-1])
 }
 
+// SortFiles sorts files in ascending From-version order for deterministic display.
 func SortFiles(files []File) {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].From < files[j].From
