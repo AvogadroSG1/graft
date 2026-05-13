@@ -16,6 +16,7 @@ import (
 	"github.com/poconnor/graft/internal/fileutil"
 )
 
+// Filename is the name of the lock file written to the project root.
 const Filename = "graft.lock"
 
 type LibraryRef struct {
