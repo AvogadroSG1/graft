@@ -39,6 +39,8 @@ type Store interface {
 // FileStore implements Store using the filesystem.
 type FileStore struct{}
 
+// DefaultPath returns the XDG-aware default path for the graft config file.
+// It respects $XDG_CONFIG_HOME and falls back to ~/.config/graft/config.json.
 func DefaultPath() (string, error) {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "graft", "config.json"), nil
