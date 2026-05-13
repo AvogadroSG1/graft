@@ -175,4 +175,5 @@ func SortFiles(files []File) {
 	})
 }
 
+// ErrPendingInput is returned when a migration requires user-provided values that have not been supplied.
 var ErrPendingInput = errors.New("pending input")
