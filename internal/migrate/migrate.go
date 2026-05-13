@@ -32,6 +32,9 @@ type Step struct {
 	Value any    `json:"value,omitempty"`
 }
 
+// Chain builds the ordered list of migration files needed to advance schema version name
+// from from to to. Returns an error if the path contains a cycle, is broken, or has
+// duplicate edges (two files with the same From version).
 func Chain(root, name, from, to string) ([]File, error) {
 	dir := filepath.Join(root, "migrations", name)
 	files, err := os.ReadDir(dir)
