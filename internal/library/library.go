@@ -349,17 +349,17 @@ func importClaude(path string) ([]model.Definition, error) {
 			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
-			Env:         cloneMap(server.Env),
+			Env:         placeholderMap(server.Env),
 			URL:         server.URL,
-			Headers:     cloneMap(server.Headers),
+			Headers:     placeholderMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"claude": {
 					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
-					Env:     cloneMap(server.Env),
+					Env:     placeholderMap(server.Env),
 					URL:     server.URL,
-					Headers: cloneMap(server.Headers),
+					Headers: placeholderMap(server.Headers),
 				},
 			},
 		})
@@ -394,17 +394,17 @@ func importCodex(path string) ([]model.Definition, error) {
 			Type:        server.Type,
 			Command:     server.Command,
 			Args:        append([]string{}, server.Args...),
-			Env:         cloneMap(server.Env),
+			Env:         placeholderMap(server.Env),
 			URL:         server.URL,
-			Headers:     cloneMap(server.Headers),
+			Headers:     placeholderMap(server.Headers),
 			Adapters: map[string]model.AdapterConfig{
 				"codex": {
 					Type:    server.Type,
 					Command: server.Command,
 					Args:    append([]string{}, server.Args...),
-					Env:     cloneMap(server.Env),
+					Env:     placeholderMap(server.Env),
 					URL:     server.URL,
-					Headers: cloneMap(server.Headers),
+					Headers: placeholderMap(server.Headers),
 				},
 			},
 		})
@@ -417,6 +417,18 @@ func cloneMap(source map[string]string) map[string]string {
 	next := map[string]string{}
 	for key, value := range source {
 		next[key] = value
+	}
+	return next
+}
+
+func placeholderMap(source map[string]string) map[string]string {
+	next := map[string]string{}
+	for key, value := range source {
+		if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+			next[key] = value
+			continue
+		}
+		next[key] = "${" + key + "}"
 	}
 	return next
 }

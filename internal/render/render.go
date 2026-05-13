@@ -135,10 +135,9 @@ func (a CodexAdapter) Render(mcp model.Definition) error {
 		Args:    stdioArgs(cfg),
 		Env:     stdioEnv(cfg),
 		URL:     remoteURL(cfg),
-		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
-	return writeToml(a.TargetFile(), doc)
+	return writeCodex(a.TargetFile(), doc)
 }
 
 func (a CodexAdapter) Remove(name string) error {
@@ -149,11 +148,12 @@ func (a CodexAdapter) Remove(name string) error {
 	if existing, ok := doc.MCPServers[name]; ok && existing.Managed {
 		delete(doc.MCPServers, name)
 	}
-	return writeToml(a.TargetFile(), doc)
+	return writeCodex(a.TargetFile(), doc)
 }
 
 type codexDoc struct {
 	MCPServers map[string]codexServer `toml:"mcp_servers"`
+	raw        map[string]any
 }
 
 type codexServer struct {
@@ -162,7 +162,6 @@ type codexServer struct {
 	Env     map[string]string `toml:"env,omitempty"`
 	Type    string            `toml:"type,omitempty"`
 	URL     string            `toml:"url,omitempty"`
-	Headers map[string]string `toml:"headers,omitempty"`
 	Managed bool              `toml:"_graft_managed,omitempty"`
 }
 
@@ -209,11 +208,14 @@ func remoteHeaders(cfg model.AdapterConfig) map[string]string {
 }
 
 func readCodex(path string) (codexDoc, error) {
-	doc := codexDoc{MCPServers: map[string]codexServer{}}
+	doc := codexDoc{MCPServers: map[string]codexServer{}, raw: map[string]any{}}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return doc, nil
 	}
 	if _, err := toml.DecodeFile(path, &doc); err != nil {
+		return doc, fmt.Errorf("parse codex config %q: %w", path, err)
+	}
+	if _, err := toml.DecodeFile(path, &doc.raw); err != nil {
 		return doc, fmt.Errorf("parse codex config %q: %w", path, err)
 	}
 	if doc.MCPServers == nil {
@@ -239,6 +241,21 @@ func writeToml(path string, value any) error {
 	}
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(value); err != nil {
+		return err
+	}
+	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
+}
+
+func writeCodex(path string, doc codexDoc) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create target dir: %w", err)
+	}
+	if doc.raw == nil {
+		doc.raw = map[string]any{}
+	}
+	doc.raw["mcp_servers"] = doc.MCPServers
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(doc.raw); err != nil {
 		return err
 	}
 	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
