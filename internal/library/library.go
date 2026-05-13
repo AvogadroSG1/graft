@@ -64,6 +64,7 @@ func (c GitClient) Add(ctx context.Context, lib config.Library) error {
 	return nil
 }
 
+// Pull fast-forwards the local clone of lib and returns the resulting HEAD SHA.
 func (c GitClient) Pull(ctx context.Context, lib config.Library) (string, error) {
 	gitCtx, cancel := c.commandContext(ctx)
 	defer cancel()
