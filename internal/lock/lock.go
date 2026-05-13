@@ -52,6 +52,7 @@ type Store interface {
 	Save(root string, lock Lock) error
 }
 
+// FileStore implements Store using the filesystem.
 type FileStore struct{}
 
 func (FileStore) Load(root string) (Lock, error) {
