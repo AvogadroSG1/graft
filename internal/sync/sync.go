@@ -1,3 +1,4 @@
+// Package sync orchestrates applying library definition updates to a project's rendered configs.
 package sync
 
 import (
