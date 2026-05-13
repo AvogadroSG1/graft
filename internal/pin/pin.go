@@ -26,6 +26,7 @@ type Registry struct {
 	handlers map[string]Handler
 }
 
+// NewRegistry returns a Registry pre-loaded with npm, docker, and uvx handlers.
 func NewRegistry() Registry {
 	reg := Registry{order: []string{}, handlers: map[string]Handler{}}
 	reg.Register("npm", NPMHandler{})
