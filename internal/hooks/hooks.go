@@ -11,6 +11,8 @@ import (
 	"github.com/poconnor/graft/internal/fileutil"
 )
 
+// Marker and EndMarker delimit the graft-managed block in shell rc files.
+// They are also used to identify graft-owned hooks in git hook files.
 const Marker = "# graft managed hook"
 const EndMarker = "# end graft managed hook"
 
