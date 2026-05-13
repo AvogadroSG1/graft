@@ -1,3 +1,4 @@
+// main is the entry point for the graft binary.
 package main
 
 import (
