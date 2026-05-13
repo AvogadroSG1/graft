@@ -35,6 +35,7 @@ func NewRegistry() Registry {
 	return reg
 }
 
+// Register adds or replaces a handler under name. Handlers are tested in registration order.
 func (r *Registry) Register(name string, handler Handler) {
 	if r.handlers == nil {
 		r.handlers = map[string]Handler{}
