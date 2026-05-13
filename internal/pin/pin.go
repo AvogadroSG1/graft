@@ -46,6 +46,7 @@ func (r *Registry) Register(name string, handler Handler) {
 	r.handlers[name] = handler
 }
 
+// Handler returns the first registered handler whose Detect method returns true for command.
 func (r Registry) Handler(command string) (Handler, bool) {
 	for _, name := range r.order {
 		handler := r.handlers[name]
