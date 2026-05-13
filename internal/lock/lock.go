@@ -91,6 +91,7 @@ func (FileStore) Save(root string, lock Lock) error {
 	return fileutil.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
+// HashBytes returns the lowercase hex-encoded SHA256 digest of data.
 func HashBytes(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
