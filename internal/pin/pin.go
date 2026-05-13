@@ -1,5 +1,7 @@
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -destination=mock/handler.go -package=mock github.com/poconnor/graft/internal/pin Handler
 
+// Package pin enforces reproducible version pinning for MCP server runtimes.
+// Supported runtimes: npm (sha512 integrity), Docker (sha256 digest), uvx (sha256 hash).
 package pin
 
 import (
