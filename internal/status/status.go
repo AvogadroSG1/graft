@@ -70,6 +70,7 @@ func Resolve(root string, cfg config.Config, lk lock.Lock, index map[string]mode
 	return Result{State: StateConfigured, Details: []string{"all selected MCPs are current"}}
 }
 
+// JSON returns the result as indented JSON bytes.
 func (r Result) JSON() ([]byte, error) {
 	return json.MarshalIndent(r, "", "  ")
 }
