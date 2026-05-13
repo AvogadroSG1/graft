@@ -32,6 +32,8 @@ type Client interface {
 	Reindex(lib config.Library) (model.LibraryIndex, error)
 }
 
+// GitClient implements Client by shelling out to git. GitPath overrides the git binary
+// (defaults to "git"); Timeout, if positive, caps each git subprocess.
 type GitClient struct {
 	GitPath string
 	Timeout time.Duration
