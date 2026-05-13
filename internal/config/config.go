@@ -52,6 +52,8 @@ func DefaultPath() (string, error) {
 	return filepath.Join(home, ".config", "graft", "config.json"), nil
 }
 
+// Load reads the config from path. If path is empty, DefaultPath is used.
+// Missing config files return an empty Config rather than an error.
 func (FileStore) Load(path string) (Config, error) {
 	if path == "" {
 		var err error
