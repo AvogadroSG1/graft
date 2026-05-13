@@ -35,6 +35,8 @@ func Execute(ctx context.Context) error {
 	return cmd.ExecuteContext(ctx)
 }
 
+// ExitCode maps an error to a POSIX exit code: 0 for nil, 2 for usage errors
+// (wrong number of arguments), 1 for all other errors.
 func ExitCode(err error) int {
 	if err == nil {
 		return 0
