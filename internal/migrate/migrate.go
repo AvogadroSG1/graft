@@ -21,6 +21,9 @@ type File struct {
 	Steps []Step `json:"steps"`
 }
 
+// Step is a single transformation within a migration file.
+// Supported types: "rename" (rename a field), "set_default" (fill missing field),
+// "require_input" (prompt the user for a value).
 type Step struct {
 	Type  string `json:"type"`
 	From  string `json:"from,omitempty"`
