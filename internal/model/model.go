@@ -1,5 +1,9 @@
+// Package model defines the shared domain types for MCP server definitions and library indexes.
 package model
 
+// Pin records the exact version and hash of an MCP server's runtime artifact,
+// enabling reproducible installs. The Hash format depends on the runtime:
+// sha512- prefix for npm, sha256: prefix for uvx, sha256:... digest for Docker.
 type Pin struct {
 	Runtime string `json:"runtime"`
 	Version string `json:"version"`
