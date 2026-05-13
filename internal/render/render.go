@@ -1,5 +1,8 @@
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -destination=mock/adapter.go -package=mock github.com/poconnor/graft/internal/render Adapter
 
+// Package render writes resolved MCP definitions into AI tool config files.
+// ClaudeAdapter targets .mcp.json; CodexAdapter targets .codex/config.toml.
+// Both adapters refuse to overwrite entries that were not placed there by graft.
 package render
 
 import (
