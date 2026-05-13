@@ -15,6 +15,9 @@ import (
 	"github.com/poconnor/graft/internal/fileutil"
 )
 
+// Library is a registered MCP library entry. URL points to the git remote;
+// CachePath is the local clone location (defaults to ~/.cache/graft/libraries/<name>).
+// The first registered library, or the one with Default: true, is used when no --library flag is given.
 type Library struct {
 	Name      string `json:"name"`
 	URL       string `json:"url"`
