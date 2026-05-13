@@ -39,6 +39,7 @@ type GitClient struct {
 	Timeout time.Duration
 }
 
+// Add clones lib.URL into lib.CachePath. It is a no-op if the cache directory already exists.
 func (c GitClient) Add(ctx context.Context, lib config.Library) error {
 	if lib.URL == "" {
 		return fmt.Errorf("library %q requires url", lib.Name)
