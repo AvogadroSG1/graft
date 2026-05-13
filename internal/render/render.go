@@ -18,6 +18,7 @@ import (
 	"github.com/poconnor/graft/internal/model"
 )
 
+// Adapter writes and removes MCP server entries in a tool-specific config file.
 type Adapter interface {
 	Render(mcp model.Definition) error
 	Remove(name string) error
