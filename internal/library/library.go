@@ -232,6 +232,8 @@ func ValidateMCPName(name string) error {
 	return nil
 }
 
+// NormalizeDefinition ensures all slice and map fields are non-nil so that JSON
+// serialization produces [] and {} rather than null.
 func NormalizeDefinition(def *model.Definition) {
 	if def.Tags == nil {
 		def.Tags = []string{}
