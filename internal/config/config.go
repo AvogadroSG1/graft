@@ -99,6 +99,8 @@ func (FileStore) Save(path string, cfg Config) error {
 	return fileutil.AtomicWriteFile(path, append(data, '\n'), 0o600)
 }
 
+// DefaultLibrary returns the library marked as default, or the first library if none is marked.
+// Returns false only when the config has no libraries at all.
 func (c Config) DefaultLibrary() (Library, bool) {
 	for _, lib := range c.Libraries {
 		if lib.Default {
