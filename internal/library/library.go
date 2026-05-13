@@ -1,5 +1,7 @@
 //go:generate go run go.uber.org/mock/mockgen@v0.6.0 -destination=mock/client.go -package=mock github.com/poconnor/graft/internal/library Client
 
+// Package library implements the git-backed MCP library client. Libraries are plain
+// git repositories with a library.json index and an mcps/ directory of JSON definitions.
 package library
 
 import (
