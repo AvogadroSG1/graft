@@ -16,6 +16,8 @@ import (
 const Marker = "# graft managed hook"
 const EndMarker = "# end graft managed hook"
 
+// InstallShellHook appends a graft-managed cd alias block to rcPath. It is idempotent:
+// if the marker is already present the file is left unchanged.
 func InstallShellHook(rcPath string) error {
 	snippet := Marker + "\n" +
 		"graft_cd() { builtin cd \"$@\" && command -v graft >/dev/null && [[ -f graft.lock ]] && graft status --quiet; }\n" +
