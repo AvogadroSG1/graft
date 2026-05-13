@@ -74,6 +74,8 @@ type IndexEntry struct {
 	SHA256      string   `json:"sha256"`
 }
 
+// LibraryIndex is the root of a library's library.json index file.
+// It lists all available MCPs with their current SHA256 hashes.
 type LibraryIndex struct {
 	Name string       `json:"name"`
 	MCPs []IndexEntry `json:"mcps"`
