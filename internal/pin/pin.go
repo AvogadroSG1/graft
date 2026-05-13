@@ -57,6 +57,9 @@ func (r Registry) Handler(command string) (Handler, bool) {
 	return nil, false
 }
 
+// Enforce validates that the installed runtime version satisfies pin. If there is a mismatch
+// and force is true, the caller must also pass the exact phrase "I understand the risk" as
+// confirmation — this two-factor check prevents accidental bypass of security pins.
 func Enforce(handler Handler, pin model.Pin, installedVersion string, force bool, confirmation string) error {
 	if handler == nil {
 		return errors.New("no pin handler for runtime")
