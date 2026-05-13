@@ -1,3 +1,7 @@
+// Package migrate applies forward migrations to MCP definition documents. Migration files
+// are JSON files under migrations/<name>/ that describe a graph of schema transitions
+// (rename fields, set defaults, require user input). Chain builds the migration path
+// and Apply executes the steps.
 package migrate
 
 import (
