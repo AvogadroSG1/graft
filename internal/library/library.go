@@ -249,6 +249,8 @@ func NormalizeDefinition(def *model.Definition) {
 	}
 }
 
+// ImportFile reads an existing Claude .mcp.json or Codex .codex/config.toml and converts
+// each server entry into a model.Definition. The format is inferred from the file extension.
 func ImportFile(path string) ([]model.Definition, error) {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".json":
