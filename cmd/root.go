@@ -1,3 +1,5 @@
+// Package cmd contains all Cobra command definitions for the graft CLI.
+// NewRootCommand assembles the full command tree; Execute is the entry point called from main.
 package cmd
 
 import (
