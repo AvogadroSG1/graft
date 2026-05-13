@@ -33,6 +33,7 @@ const (
 	StateUnknownLibrary State = "unknown_library"
 )
 
+// Result is the output of a status check.
 type Result struct {
 	State   State    `json:"state"`
 	Details []string `json:"details"`
