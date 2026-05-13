@@ -1,0 +1,92 @@
+# graft
+
+> A Go CLI that manages versioned, git-backed libraries of MCP (Model Context Protocol) server definitions and syncs them into Claude Code and OpenAI Codex project config files.
+
+## Project
+
+- **Module**: `github.com/poconnor/graft`
+- **Language**: Go 1.22+
+- **Binary**: `graft`
+- **License**: MIT
+
+## Purpose
+
+graft solves the problem of keeping MCP server definitions consistent across projects and teammates. It maintains a local cache of git-cloned "libraries" containing MCP definitions, tracks which definitions each project has pinned in a `graft.lock` file, and writes the resolved configs into `.mcp.json` (Claude Code) and `.codex/config.toml` (OpenAI Codex). It detects drift when library definitions change after the last sync.
+
+## CLI Commands
+
+```
+graft init                              Initialize graft in the current project (creates graft.lock)
+graft library add <name> <url>          Clone and register a git-backed MCP library
+graft library list                      List all registered libraries
+graft library pull [name]               Fast-forward one or all libraries to latest
+graft library show [name] [mcp]         Show library index or a single MCP definition (--tag, --json)
+graft mcp import --from <file>          Import MCP definitions from an existing .mcp.json or .codex/config.toml
+graft mcp add <name>                    Add a new MCP definition to the default library
+graft mcp edit <name>                   Open an MCP definition in $EDITOR (defaults to pico)
+graft mcp push --yes                    Reindex, commit, and push library changes to origin
+graft status                            Report drift state: uninitialized|initialized|configured|drifted|pending_input|unknown_library (--quiet, --json)
+graft sync                              Apply library updates to selected MCPs in the project
+graft install-hooks                     Install shell cd alias and git post-checkout hook (--uninstall, --shell-rc, --git-dir)
+graft pick                              Interactive TUI to browse and select MCPs from registered libraries
+```
+
+**Global flags**: `--config <path>` (config file path), `--root <dir>` (project root, default `.`)
+
+## Internal Package Structure
+
+| Package | Role |
+|---|---|
+| `cmd/` | Cobra command tree — root command, subcommands, flag wiring |
+| `internal/config` | Reads and writes `~/.config/graft/config.json`; manages registered library records |
+| `internal/lock` | Reads and writes `graft.lock`; tracks pinned library refs and MCP selections per project |
+| `internal/library` | Git operations for library management: clone, pull, index, read definitions |
+| `internal/model` | Shared domain types: `Pin`, MCP definition structs |
+| `internal/pin` | Enforces reproducible version pins — validates sha512 (npm), sha256 digest (Docker), sha256 hash (uvx) |
+| `internal/render` | Writes resolved MCP definitions into `.mcp.json` and `.codex/config.toml` |
+| `internal/status` | Computes and reports project drift state |
+| `internal/sync` | Orchestrates a full sync: resolves pins, calls render, updates lock |
+| `internal/migrate` | Parses existing `.mcp.json` and `.codex/config.toml` files for import |
+| `internal/hooks` | Installs and uninstalls the zshrc `cd` alias and git `post-checkout` hook |
+| `internal/tui` | Bubbletea TUI model for `graft pick` — interactive MCP selection |
+| `internal/fileutil` | Shared file utilities (atomic writes) |
+| `features/` | Godog BDD feature specs |
+
+## Key Files
+
+| Path | Purpose |
+|---|---|
+| `~/.config/graft/config.json` | Global config (XDG-aware); lists registered libraries with name, url, cache_path |
+| `<project>/graft.lock` | Per-project lock file; pins library refs and selected MCP definitions |
+| `<project>/.mcp.json` | Claude Code MCP server config (written by `graft sync`) |
+| `<project>/.codex/config.toml` | OpenAI Codex MCP server config (written by `graft sync`) |
+
+## Build and Test
+
+```bash
+# Build
+go build -o graft .
+
+# Install from source
+go install github.com/poconnor/graft@latest
+
+# Unit tests
+make test        # runs: go test ./...
+
+# BDD tests (Godog)
+make bdd-test
+
+# Lint
+make lint        # runs: golangci-lint run
+```
+
+## Key Dependencies
+
+| Dependency | Purpose |
+|---|---|
+| `github.com/spf13/cobra` | CLI command structure and flag parsing |
+| `github.com/charmbracelet/bubbletea` | Terminal UI framework for `graft pick` |
+| `github.com/charmbracelet/lipgloss` | TUI styling |
+| `github.com/BurntSushi/toml` | Read/write `.codex/config.toml` |
+| `github.com/cucumber/godog` | BDD test runner (Gherkin feature specs) |
+| `go.uber.org/mock` | Mock generation for unit tests |
