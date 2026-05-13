@@ -19,6 +19,8 @@ import (
 // Filename is the name of the lock file written to the project root.
 const Filename = "graft.lock"
 
+// LibraryRef records a library that this project has registered.
+// Commit is the git SHA at the time of the last sync; empty means unpinned.
 type LibraryRef struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
