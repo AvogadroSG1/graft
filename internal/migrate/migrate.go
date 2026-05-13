@@ -14,6 +14,7 @@ import (
 	"strings"
 )
 
+// File represents a single migration edge in the schema version graph.
 type File struct {
 	From  string `json:"from"`
 	To    string `json:"to"`
