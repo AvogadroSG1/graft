@@ -73,7 +73,7 @@ func TestLoadGroupsGlobalLocalAndProjectStdioMCPs(t *testing.T) {
 	}
 }
 
-func TestLoadSkipsCommandlessServersInStdioOnlyMode(t *testing.T) {
+func TestLoadSkipsCommandlessServersWithoutExplicitRemoteType(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	source := filepath.Join(root, "claude.json")

@@ -88,3 +88,25 @@ func TestImportFileParsesHTTPTransports(t *testing.T) {
 		t.Fatalf("Codex import = %+v, want SSE definition", codexDefs)
 	}
 }
+
+func TestImportFileRedactsLiteralHeaderAndEnvValues(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	content := `{"mcpServers":{"remote":{"type":"http","url":"https://example.com/mcp","headers":{"Authorization":"Bearer real-secret"},"env":{"TOKEN":"real-token"}}}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defs, err := ImportFile(path)
+	if err != nil {
+		t.Fatalf("ImportFile() error = %v", err)
+	}
+
+	def := defs[0]
+	if def.Headers["Authorization"] != "${Authorization}" || def.Env["TOKEN"] != "${TOKEN}" {
+		t.Fatalf("ImportFile() did not redact literals: headers=%+v env=%+v", def.Headers, def.Env)
+	}
+	if def.Adapters["claude"].Headers["Authorization"] != "${Authorization}" || def.Adapters["claude"].Env["TOKEN"] != "${TOKEN}" {
+		t.Fatalf("ImportFile() did not redact adapter literals: %+v", def.Adapters["claude"])
+	}
+}
