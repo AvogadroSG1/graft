@@ -69,6 +69,9 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 	return result
 }
 
+// AuthWarning returns a human-readable warning if any env key or value contains
+// credential-bearing patterns (TOKEN, SECRET, PASSWORD, CREDENTIAL, or a Bearer prefix).
+// Returns an empty string when the definition appears credential-free.
 func AuthWarning(command string, env map[string]string) string {
 	for key, value := range env {
 		upperKey := strings.ToUpper(key)
