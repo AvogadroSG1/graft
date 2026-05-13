@@ -1,3 +1,4 @@
+// Package tui provides the interactive Bubbletea model for "graft pick".
 package tui
 
 import (
