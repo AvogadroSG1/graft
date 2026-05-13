@@ -27,6 +27,10 @@ type LibraryRef struct {
 	Commit string `json:"commit,omitempty"`
 }
 
+// InstalledMCP records a single MCP definition that has been synced into a project.
+// DefinitionHash is the SHA256 of the definition JSON at the time of installation;
+// a mismatch with the library's current hash indicates drift.
+// PendingInput is set when the definition requires user-provided environment values before it can be activated.
 type InstalledMCP struct {
 	Name           string `json:"name"`
 	Library        string `json:"library"`
