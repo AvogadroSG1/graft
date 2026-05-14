@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/poconnor/graft/internal/config"
 )
 
 func TestLibraryMigrateFromClaudeDryRunDoesNotWriteOrPrompt(t *testing.T) {
@@ -205,8 +207,13 @@ func TestLibraryMigrateFromClaudePreservesExistingDefault(t *testing.T) {
 	if err := os.MkdirAll(cachePath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	configContent := `{"libraries":[{"name":"imported","url":"` + cachePath + `","cache_path":"` + cachePath + `","default":true}]}`
-	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
+	cfgBytes, err := json.Marshal(config.Config{Libraries: []config.Library{
+		{Name: "imported", URL: cachePath, CachePath: cachePath, Default: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, cfgBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

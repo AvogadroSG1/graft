@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/poconnor/graft/internal/fileutil"
@@ -16,13 +17,44 @@ import (
 const Marker = "# graft managed hook"
 const EndMarker = "# end graft managed hook"
 
-// InstallShellHook appends a graft-managed cd alias block to rcPath. It is idempotent:
-// if the marker is already present the file is left unchanged.
-func InstallShellHook(rcPath string) error {
-	snippet := Marker + "\n" +
+// DefaultRCPath returns the default shell rc file path for the current OS.
+// On Windows it returns the WindowsPowerShell profile; on Unix it returns ~/.zshrc.
+func DefaultRCPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	return defaultRCPathForOS(runtime.GOOS, home), nil
+}
+
+func defaultRCPathForOS(goos, home string) string {
+	if goos == "windows" {
+		return filepath.Join(home, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1")
+	}
+	return filepath.Join(home, ".zshrc")
+}
+
+func shellSnippetForOS(goos string) string {
+	if goos == "windows" {
+		return Marker + "\n" +
+			"function Set-Location {\n" +
+			"    Microsoft.PowerShell.Management\\Set-Location @PSBoundParameters\n" +
+			"    if (Get-Command graft -ErrorAction SilentlyContinue) {\n" +
+			"        if (Test-Path \"graft.lock\") { graft status --quiet }\n" +
+			"    }\n" +
+			"}\n" +
+			EndMarker + "\n"
+	}
+	return Marker + "\n" +
 		"graft_cd() { builtin cd \"$@\" && command -v graft >/dev/null && [[ -f graft.lock ]] && graft status --quiet; }\n" +
 		"alias cd=graft_cd\n" +
 		EndMarker + "\n"
+}
+
+// InstallShellHook appends a graft-managed cd alias block to rcPath. It is idempotent:
+// if the marker is already present the file is left unchanged.
+func InstallShellHook(rcPath string) error {
+	snippet := shellSnippetForOS(runtime.GOOS)
 	data, err := os.ReadFile(rcPath)
 	if err == nil && strings.Contains(string(data), Marker) {
 		return nil
@@ -96,11 +128,12 @@ func removeShellBlock(rcPath string) error {
 	next := []string{}
 	skip := false
 	for _, line := range lines {
-		if line == Marker {
+		trimmed := strings.TrimRight(line, "\r")
+		if trimmed == Marker {
 			skip = true
 			continue
 		}
-		if skip && line == EndMarker {
+		if skip && trimmed == EndMarker {
 			skip = false
 			continue
 		}

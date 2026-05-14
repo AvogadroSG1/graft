@@ -547,7 +547,7 @@ func newMCPEditCommand(opts *appOptions) *cobra.Command {
 				return fmt.Errorf("no default library configured")
 			}
 			path := filepath.Join(lib.CachePath, "mcps", args[0]+".json")
-			return printf(cmd, "edit %s with /usr/bin/pico\n", path)
+			return printf(cmd, "edit %s\n", path)
 		},
 	}
 }
@@ -654,7 +654,11 @@ func newInstallHooksCommand(opts *appOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if rcPath == "" {
-				rcPath = filepath.Join(os.Getenv("HOME"), ".zshrc")
+				var err error
+				rcPath, err = hooks.DefaultRCPath()
+				if err != nil {
+					return err
+				}
 			}
 			if gitDir == "" {
 				gitDir = filepath.Join(opts.root, ".git")

@@ -34,12 +34,14 @@ func TestConfig_WithLibrarySetsFirstAsDefault(t *testing.T) {
 }
 
 func TestDefaultPathUsesXDGConfigHome(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/tmp/graft-xdg")
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
 	got, err := DefaultPath()
 	if err != nil {
 		t.Fatalf("DefaultPath() error = %v", err)
 	}
-	if got != "/tmp/graft-xdg/graft/config.json" {
-		t.Fatalf("DefaultPath() = %q", got)
+	want := filepath.Join(dir, "graft", "config.json")
+	if got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }

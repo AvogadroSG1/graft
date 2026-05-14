@@ -261,12 +261,14 @@ func TestLoadHTTPRoundTripRendersClaudeAndCodex(t *testing.T) {
 }
 
 func TestDefaultPathUsesClaudeConfigDirBeforeHome(t *testing.T) {
-	t.Setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
 	got, err := DefaultPath()
 	if err != nil {
 		t.Fatalf("DefaultPath() error = %v", err)
 	}
-	if got != "/tmp/claude-config/claude.json" {
-		t.Fatalf("DefaultPath() = %q", got)
+	want := filepath.Join(dir, "claude.json")
+	if got != want {
+		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
 }
