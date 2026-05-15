@@ -639,6 +639,9 @@ func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 					{Name: "codex", Adapter: render.NewCodexAdapter(opts.root)},
 				},
 			)
+			if err := (lock.FileStore{}).Save(opts.root, result.Lock); err != nil {
+				return err
+			}
 			return writeValue(cmd, true, result)
 		},
 	}

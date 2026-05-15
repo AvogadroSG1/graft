@@ -3,10 +3,16 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/poconnor/graft/internal/config"
+	"github.com/poconnor/graft/internal/library"
+	"github.com/poconnor/graft/internal/lock"
+	"github.com/poconnor/graft/internal/model"
 )
 
 func TestInitCommandCreatesLockAndTargets(t *testing.T) {
@@ -55,6 +61,73 @@ func TestCommandsRejectUnexpectedArgs(t *testing.T) {
 	}
 }
 
+func TestSyncCommandSavesPendingInputLock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: t.TempDir(), Default: true}
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1", DefinitionHash: "old", Target: "claude"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := library.WriteDefinitionFile(lib, model.Definition{Name: "docs", Version: "2", Command: "npx"}, true); err != nil {
+		t.Fatal(err)
+	}
+	writeCommandMigration(t, lib.CachePath, "docs", map[string]any{
+		"from": "1",
+		"to":   "2",
+		"steps": []map[string]any{
+			{"type": "require_input", "path": "env.token"},
+		},
+	})
+
+	command := NewRootCommand(context.Background())
+	command.SetArgs([]string{"--config", cfgPath, "--root", root, "sync"})
+	var out bytes.Buffer
+	command.SetOut(&out)
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, err := (lock.FileStore{}).Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.MCPs) != 1 || !got.MCPs[0].PendingInput {
+		t.Fatalf("saved lock = %+v, want pending_input", got)
+	}
+}
+
+func TestStatusCommandPrintsPendingInput(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{{Name: "core", URL: "url"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "url"}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core", PendingInput: true}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	command := NewRootCommand(context.Background())
+	command.SetArgs([]string{"--config", cfgPath, "--root", root, "status"})
+	var out bytes.Buffer
+	command.SetOut(&out)
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "pending_input" {
+		t.Fatalf("status output = %q, want pending_input", got)
+	}
+}
+
 func TestExitCodeClassifiesUsageErrors(t *testing.T) {
 	t.Parallel()
 	if got := ExitCode(&cmdError{text: "accepts 0 arg(s), received 1"}); got != 2 {
@@ -68,4 +141,20 @@ type cmdError struct {
 
 func (e *cmdError) Error() string {
 	return e.text
+}
+
+func writeCommandMigration(t *testing.T, root, name string, body map[string]any) {
+	t.Helper()
+	dir := filepath.Join(root, "migrations", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, body["from"].(string)+"-to-"+body["to"].(string)+".json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

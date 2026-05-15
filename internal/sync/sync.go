@@ -2,12 +2,15 @@
 package sync
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/poconnor/graft/internal/config"
 	"github.com/poconnor/graft/internal/library"
 	"github.com/poconnor/graft/internal/lock"
+	"github.com/poconnor/graft/internal/migrate"
 	"github.com/poconnor/graft/internal/model"
 	"github.com/poconnor/graft/internal/pin"
 	"github.com/poconnor/graft/internal/render"
@@ -18,6 +21,7 @@ type Result struct {
 	Succeeded []string
 	Failed    []string
 	Skipped   []string
+	Lock      lock.Lock `json:"-"`
 }
 
 // Apply iterates over the MCPs in the lock file, fetches each definition from the library,
@@ -28,9 +32,10 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 		Succeeded: []string{},
 		Failed:    []string{},
 		Skipped:   []string{},
+		Lock:      lk,
 	}
 	seen := map[string]bool{}
-	for _, mcp := range lk.MCPs {
+	for idx, mcp := range lk.MCPs {
 		key := mcp.Library + "/" + mcp.Name
 		if seen[key] {
 			result.Skipped = append(result.Skipped, mcp.Name)
@@ -44,6 +49,22 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 		}
 		def, hash, err := client.Definition(lib, mcp.Name)
 		if err != nil || hash == mcp.DefinitionHash {
+			result.Skipped = append(result.Skipped, mcp.Name)
+			continue
+		}
+		migrated, pending, err := migrateDefinition(lib, mcp, def)
+		if err != nil {
+			if errors.Is(err, migrate.ErrPendingInput) {
+				result.Lock.MCPs[idx].PendingInput = true
+				result.Skipped = append(result.Skipped, mcp.Name)
+				continue
+			}
+			result.Failed = append(result.Failed, mcp.Name)
+			continue
+		}
+		def = migrated
+		if pending {
+			result.Lock.MCPs[idx].PendingInput = true
 			result.Skipped = append(result.Skipped, mcp.Name)
 			continue
 		}
@@ -65,8 +86,46 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 			continue
 		}
 		result.Succeeded = append(result.Succeeded, mcp.Name)
+		result.Lock.MCPs[idx].Version = def.Version
+		result.Lock.MCPs[idx].DefinitionHash = hash
+		result.Lock.MCPs[idx].PendingInput = false
 	}
 	return result
+}
+
+func migrateDefinition(lib config.Library, mcp lock.InstalledMCP, def model.Definition) (model.Definition, bool, error) {
+	if mcp.Version == "" || def.Version == "" || mcp.Version == def.Version {
+		return def, false, nil
+	}
+	chain, err := migrate.Chain(lib.CachePath, mcp.Name, mcp.Version, def.Version)
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	data, err := json.Marshal(def)
+	if err != nil {
+		return model.Definition{}, false, fmt.Errorf("marshal definition for migration: %w", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return model.Definition{}, false, fmt.Errorf("prepare definition for migration: %w", err)
+	}
+	pending := false
+	for _, file := range chain {
+		stepPending, err := migrate.Apply(doc, file.Steps, true, nil)
+		if err != nil {
+			return model.Definition{}, stepPending, err
+		}
+		pending = pending || stepPending
+	}
+	data, err = json.Marshal(doc)
+	if err != nil {
+		return model.Definition{}, false, fmt.Errorf("marshal migrated definition: %w", err)
+	}
+	var migrated model.Definition
+	if err := json.Unmarshal(data, &migrated); err != nil {
+		return model.Definition{}, false, fmt.Errorf("parse migrated definition: %w", err)
+	}
+	return migrated, pending, nil
 }
 
 // AuthWarning returns a human-readable warning if any env key or value contains
