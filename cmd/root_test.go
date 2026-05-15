@@ -46,7 +46,6 @@ func TestCommandsRejectUnexpectedArgs(t *testing.T) {
 		{name: "library list", args: []string{"library", "list", "extra"}},
 		{name: "mcp import", args: []string{"mcp", "import", "extra", "--from", "x.json"}},
 		{name: "status", args: []string{"status", "extra"}},
-		{name: "sync", args: []string{"sync", "extra"}},
 		{name: "install hooks", args: []string{"install-hooks", "extra"}},
 		{name: "pick", args: []string{"pick", "extra"}},
 	}
@@ -87,7 +86,7 @@ func TestSyncCommandSavesPendingInputLock(t *testing.T) {
 	})
 
 	command := NewRootCommand(context.Background())
-	command.SetArgs([]string{"--config", cfgPath, "--root", root, "sync"})
+	command.SetArgs([]string{"--config", cfgPath, "--root", root, "sync", "--no-pull"})
 	var out bytes.Buffer
 	command.SetOut(&out)
 	if err := command.Execute(); err != nil {

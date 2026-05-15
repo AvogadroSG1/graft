@@ -618,10 +618,15 @@ func newStatusCommand(opts *appOptions) *cobra.Command {
 }
 
 func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
-	return &cobra.Command{
+	return newSyncCommandWithDeps(ctx, opts, library.GitClient{}, nil)
+}
+
+func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, adapters []render.AdapterByName) *cobra.Command {
+	var noPull bool
+	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Apply library updates to selected MCPs",
-		Args:  cobra.NoArgs,
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
@@ -631,15 +636,40 @@ func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_ = ctx
-			result := graftsync.Apply(
-				lk,
-				cfg,
-				library.GitClient{},
-				[]render.AdapterByName{
+			pullLibraries, err := syncPullLibraries(cfg, lk, args)
+			if err != nil {
+				return err
+			}
+			if !noPull {
+				for _, lib := range pullLibraries {
+					if _, err := client.Pull(ctx, lib); err != nil {
+						return err
+					}
+				}
+			}
+			if len(lk.MCPs) == 0 {
+				return writeValue(cmd, true, graftsync.Result{
+					Succeeded: []string{},
+					Failed:    []string{},
+					Skipped:   []string{},
+					Warnings:  []string{},
+					Errors:    []string{},
+					Lock:      lk,
+				})
+			}
+			activeAdapters := adapters
+			if activeAdapters == nil {
+				activeAdapters = []render.AdapterByName{
 					{Name: "claude", Adapter: render.NewClaudeAdapter(opts.root)},
 					{Name: "codex", Adapter: render.NewCodexAdapter(opts.root)},
-				},
+				}
+			}
+			result := graftsync.ApplyWithOptions(
+				lk,
+				cfg,
+				client,
+				activeAdapters,
+				graftsync.Options{Names: args},
 			)
 			if err := (lock.FileStore{}).Save(opts.root, result.Lock); err != nil {
 				return err
@@ -647,6 +677,38 @@ func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 			return writeValue(cmd, true, result)
 		},
 	}
+	cmd.Flags().BoolVar(&noPull, "no-pull", false, "skip pulling libraries before sync")
+	return cmd
+}
+
+func syncPullLibraries(cfg config.Config, lk lock.Lock, names []string) ([]config.Library, error) {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		wanted[name] = true
+	}
+	matched := map[string]bool{}
+	seenLibraries := map[string]bool{}
+	pullLibraries := []config.Library{}
+	for _, mcp := range lk.MCPs {
+		if len(wanted) > 0 {
+			if !wanted[mcp.Name] {
+				continue
+			}
+			matched[mcp.Name] = true
+		}
+		lib, ok := cfg.Library(mcp.Library)
+		if !ok || seenLibraries[lib.Name] {
+			continue
+		}
+		seenLibraries[lib.Name] = true
+		pullLibraries = append(pullLibraries, lib)
+	}
+	for name := range wanted {
+		if !matched[name] {
+			return nil, fmt.Errorf("MCP %q is not installed", name)
+		}
+	}
+	return pullLibraries, nil
 }
 
 func newInstallHooksCommand(opts *appOptions) *cobra.Command {

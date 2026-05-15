@@ -43,6 +43,219 @@ func TestApplyMarksPendingInputWhenMigrationRequiresInput(t *testing.T) {
 	}
 }
 
+func TestApplyFailsDefinitionErrorsInsteadOfSkipping(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{err: errDefinitionFailed},
+		[]render.AdapterByName{{Name: "claude", Adapter: &recordingAdapter{}}},
+	)
+	if len(result.Failed) != 1 || result.Failed[0] != "docs" {
+		t.Fatalf("Apply() failed = %+v, want docs", result.Failed)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "definition") {
+		t.Fatalf("Apply() errors = %+v, want definition failure detail", result.Errors)
+	}
+}
+
+func TestApplySkipsCurrentAndOnlyProcessesNamedDrift(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	client := fakeClient{defs: map[string]definitionResult{
+		"docs":  {def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new-docs"},
+		"build": {def: model.Definition{Name: "build", Version: "1", Command: "npx"}, hash: "same-build"},
+	}}
+	result := ApplyWithOptions(
+		lock.Lock{MCPs: []lock.InstalledMCP{
+			{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old-docs", Target: "claude"},
+			{Name: "build", Library: "core", Version: "1", DefinitionHash: "same-build", Target: "claude"},
+		}},
+		config.Config{Libraries: []config.Library{lib}},
+		client,
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+		Options{Names: []string{"docs"}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("Apply() succeeded = %+v, want docs", result.Succeeded)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "build" {
+		t.Fatalf("Apply() skipped = %+v, want build skipped by filter/current", result.Skipped)
+	}
+	if !adapter.rendered || adapter.def.Name != "docs" {
+		t.Fatalf("rendered definition = %+v, want docs only", adapter.def)
+	}
+}
+
+func TestApplySkipsAlreadyCurrentMCP(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1", DefinitionHash: "same", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "1", Command: "npx"}, hash: "same"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered already-current MCP")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "docs" {
+		t.Fatalf("Apply() skipped = %+v, want docs", result.Skipped)
+	}
+}
+
+func TestApplyReportsSucceededFailedAndSkippedTogether(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	client := fakeClient{defs: map[string]definitionResult{
+		"docs":  {def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new-docs"},
+		"bad":   {err: errDefinitionFailed},
+		"build": {def: model.Definition{Name: "build", Version: "1", Command: "npx"}, hash: "same-build"},
+	}}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{
+			{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old-docs", Target: "claude"},
+			{Name: "bad", Library: "core", Version: "1", DefinitionHash: "old-bad", Target: "claude"},
+			{Name: "build", Library: "core", Version: "1", DefinitionHash: "same-build", Target: "claude"},
+		}},
+		config.Config{Libraries: []config.Library{lib}},
+		client,
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("succeeded = %+v, want docs", result.Succeeded)
+	}
+	if len(result.Failed) != 1 || result.Failed[0] != "bad" {
+		t.Fatalf("failed = %+v, want bad", result.Failed)
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "build" {
+		t.Fatalf("skipped = %+v, want build", result.Skipped)
+	}
+}
+
+func TestApplyWarnsAndSkipsAuthSensitiveDefinition(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}, Headers: map[string]string{"Authorization": "${AUTH}"}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered auth-sensitive definition")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "docs" {
+		t.Fatalf("Apply() skipped = %+v, want docs", result.Skipped)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "auth warning") {
+		t.Fatalf("Apply() warnings = %+v, want auth warning", result.Warnings)
+	}
+}
+
+func TestApplyWarnsAndSkipsAdapterOverrideAuthDefinition(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{
+			Name:     "docs",
+			Version:  "2",
+			Command:  "npx",
+			Adapters: map[string]model.AdapterConfig{"claude": {Headers: map[string]string{"Authorization": "${AUTH}"}}},
+		}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered adapter auth-sensitive definition")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "docs" {
+		t.Fatalf("Apply() skipped = %+v, want docs", result.Skipped)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "claude") {
+		t.Fatalf("Apply() warnings = %+v, want claude auth warning", result.Warnings)
+	}
+}
+
+func TestApplyWarnsWhenMigrationIntroducesCredentials(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	writeMigration(t, lib.CachePath, "docs", map[string]any{
+		"from": "1",
+		"to":   "2",
+		"steps": []map[string]any{
+			{"type": "set_default", "path": "env.API_KEY", "value": "${API_KEY}"},
+		},
+	})
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered definition after migration introduced credentials")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "docs" {
+		t.Fatalf("Apply() skipped = %+v, want docs", result.Skipped)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "auth warning") {
+		t.Fatalf("Apply() warnings = %+v, want migrated auth warning", result.Warnings)
+	}
+}
+
+func TestApplyFailsMixedUnknownTargetWithoutRendering(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude,bad"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered a partial unknown target")
+	}
+	if len(result.Failed) != 1 || result.Failed[0] != "docs" {
+		t.Fatalf("Apply() failed = %+v, want docs", result.Failed)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "bad") {
+		t.Fatalf("Apply() errors = %+v, want bad target detail", result.Errors)
+	}
+}
+
+func TestAuthWarningCoversCredentialPatternsAndAdapterOverrides(t *testing.T) {
+	t.Parallel()
+	tests := []model.Definition{
+		{Name: "token", Command: "npx", Env: map[string]string{"ACCESS_TOKEN": "${ACCESS_TOKEN}"}},
+		{Name: "secret", Command: "npx", Env: map[string]string{"CLIENT_SECRET": "${CLIENT_SECRET}"}},
+		{Name: "password", Command: "npx", Env: map[string]string{"PASSWORD": "${PASSWORD}"}},
+		{Name: "credential", Command: "npx", Env: map[string]string{"GOOGLE_CREDENTIAL": "${GOOGLE_CREDENTIAL}"}},
+		{Name: "bearer-key", Command: "npx", Env: map[string]string{"bearer_token_env_var": "TOKEN"}},
+		{Name: "bearer-value", Command: "npx", Env: map[string]string{"AUTH": "Bearer ${TOKEN}"}},
+		{Name: "adapter-header", Command: "npx", Adapters: map[string]model.AdapterConfig{"claude": {Headers: map[string]string{"Authorization": "${AUTH}"}}}},
+		{Name: "adapter-env", Command: "npx", Adapters: map[string]model.AdapterConfig{"codex": {Env: map[string]string{"API_KEY": "${API_KEY}"}}}},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.Name, func(t *testing.T) {
+			t.Parallel()
+			if got := AuthWarningForTarget(tt, "both"); got == "" {
+				t.Fatalf("AuthWarningForTarget(%s) = empty, want warning", tt.Name)
+			}
+		})
+	}
+}
+
 func TestApplyRunsAutomaticMigrationStepsBeforeRender(t *testing.T) {
 	t.Parallel()
 	lib := testLibrary(t)
@@ -134,6 +347,14 @@ func TestApplyReportsRollbackFailure(t *testing.T) {
 type fakeClient struct {
 	def  model.Definition
 	hash string
+	err  error
+	defs map[string]definitionResult
+}
+
+type definitionResult struct {
+	def  model.Definition
+	hash string
+	err  error
 }
 
 func (c fakeClient) Add(context.Context, config.Library) error {
@@ -148,7 +369,14 @@ func (c fakeClient) Index(config.Library) (model.LibraryIndex, error) {
 	return model.LibraryIndex{}, nil
 }
 
-func (c fakeClient) Definition(config.Library, string) (model.Definition, string, error) {
+func (c fakeClient) Definition(_ config.Library, name string) (model.Definition, string, error) {
+	if c.defs != nil {
+		result := c.defs[name]
+		return result.def, result.hash, result.err
+	}
+	if c.err != nil {
+		return model.Definition{}, "", c.err
+	}
 	return c.def, c.hash, nil
 }
 
@@ -194,6 +422,7 @@ func (a *recordingAdapter) TargetFile() string {
 
 var errRenderFailed = errors.New("render failed")
 var errRestoreFailed = errors.New("restore failed")
+var errDefinitionFailed = errors.New("definition failed")
 
 func testLibrary(t *testing.T) config.Library {
 	t.Helper()
