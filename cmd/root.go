@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/poconnor/graft/internal/claudecfg"
@@ -610,7 +611,19 @@ func newStatusCommandWithDeps(opts *appOptions, client library.Client) *cobra.Co
 					return err
 				}
 			}
-			result := status.Resolve(opts.root, cfg, lk, map[string]model.LibraryIndex{})
+			indexes := map[string]model.LibraryIndex{}
+			result := status.Resolve(opts.root, cfg, lk, indexes)
+			if result.State == status.StateConfigured {
+				indexes, err = statusIndexes(cfg, lk, client)
+				if err != nil {
+					return err
+				}
+				definitions, err := statusDefinitions(opts.root, cfg, lk, client)
+				if err != nil {
+					return err
+				}
+				result = status.ResolveWithDefinitions(opts.root, cfg, lk, indexes, definitions)
+			}
 			if quiet {
 				if result.State == status.StateConfigured {
 					return nil
@@ -620,7 +633,7 @@ func newStatusCommandWithDeps(opts *appOptions, client library.Client) *cobra.Co
 			if jsonOutput {
 				return writeValue(cmd, true, result)
 			}
-			return println(cmd, result.State)
+			return writeStatusPlain(cmd, result, lk, indexes)
 		},
 	}
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "exit non-zero unless configured")
@@ -711,6 +724,206 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 	cmd.Flags().BoolVar(&noPull, "no-pull", false, "skip pulling libraries before sync")
 	cmd.Flags().BoolVar(&forcePins, "force", false, "force pin mismatch after typing the risk confirmation phrase")
 	return cmd
+}
+
+func writeStatusPlain(cmd *cobra.Command, result status.Result, lk lock.Lock, indexes map[string]model.LibraryIndex) error {
+	if len(lk.MCPs) == 0 {
+		if err := println(cmd, result.State); err != nil {
+			return err
+		}
+		return writeStatusDetails(cmd, result)
+	}
+	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "ICON\tSTATE\tMCP\tINSTALLED\tLIBRARY"); err != nil {
+		return err
+	}
+	for _, mcp := range lk.MCPs {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", statusIcon(statusRowState(result, indexes, mcp)), statusRowState(result, indexes, mcp), mcp.Name, statusValue(mcp.Version), statusValue(statusLibraryVersion(indexes, mcp))); err != nil {
+			return err
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	return writeStatusDetails(cmd, result)
+}
+
+func writeStatusDetails(cmd *cobra.Command, result status.Result) error {
+	for _, detail := range result.Details {
+		if err := printf(cmd, "detail: %s\n", detail); err != nil {
+			return err
+		}
+	}
+	if hint := statusHint(result.State); hint != "" {
+		return printf(cmd, "hint: %s\n", hint)
+	}
+	return nil
+}
+
+func statusRowState(result status.Result, indexes map[string]model.LibraryIndex, mcp lock.InstalledMCP) status.State {
+	if mcp.PendingInput {
+		return status.StatePendingInput
+	}
+	if result.State == status.StateDrifted && statusDefinitionDrifted(indexes, mcp) {
+		return status.StateDrifted
+	}
+	if result.State == status.StateConfigured {
+		return status.StateConfigured
+	}
+	for _, detail := range result.Details {
+		if statusDetailMatchesMCP(detail, mcp.Name) {
+			return result.State
+		}
+	}
+	if result.State == status.StateDrifted || result.State == status.StatePinMismatch || result.State == status.StatePendingInput {
+		return status.StateConfigured
+	}
+	return result.State
+}
+
+func statusDetailMatchesMCP(detail string, name string) bool {
+	if detail == name {
+		return true
+	}
+	needle := "/" + name
+	idx := strings.Index(detail, needle)
+	if idx == -1 {
+		return false
+	}
+	after := detail[idx+len(needle):]
+	return after == "" || strings.HasPrefix(after, " ") || strings.HasPrefix(after, ":")
+}
+
+func statusDefinitionDrifted(indexes map[string]model.LibraryIndex, mcp lock.InstalledMCP) bool {
+	index, ok := indexes[mcp.Library]
+	if !ok {
+		return false
+	}
+	for _, entry := range index.MCPs {
+		if entry.Name == mcp.Name {
+			return entry.SHA256 != "" && entry.SHA256 != mcp.DefinitionHash
+		}
+	}
+	return false
+}
+
+func statusLibraryVersion(indexes map[string]model.LibraryIndex, mcp lock.InstalledMCP) string {
+	index, ok := indexes[mcp.Library]
+	if !ok {
+		return ""
+	}
+	for _, entry := range index.MCPs {
+		if entry.Name == mcp.Name {
+			return entry.Version
+		}
+	}
+	return ""
+}
+
+func statusValue(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func statusIcon(state status.State) string {
+	switch state {
+	case status.StateConfigured:
+		return "OK"
+	case status.StateDrifted, status.StatePinMismatch:
+		return "!!"
+	case status.StatePendingInput, status.StateUnknownLibrary:
+		return "??"
+	case status.StateInitialized, status.StateUninitialized:
+		return ".."
+	default:
+		return "--"
+	}
+}
+
+func statusHint(state status.State) string {
+	switch state {
+	case status.StateDrifted:
+		return "run graft sync"
+	case status.StatePinMismatch:
+		return "inspect pin metadata or run graft sync --force"
+	case status.StatePendingInput:
+		return "run graft sync and provide required input"
+	case status.StateUnknownLibrary:
+		return "register the missing library with graft library add"
+	case status.StateUninitialized:
+		return "run graft init"
+	default:
+		return ""
+	}
+}
+
+func statusIndexes(cfg config.Config, lk lock.Lock, client library.Client) (map[string]model.LibraryIndex, error) {
+	indexes := map[string]model.LibraryIndex{}
+	seen := map[string]bool{}
+	for _, ref := range lk.Libraries {
+		if seen[ref.Name] {
+			continue
+		}
+		seen[ref.Name] = true
+		lib, ok := cfg.Library(ref.Name)
+		if !ok {
+			continue
+		}
+		index, err := client.Index(lib)
+		if err != nil {
+			return nil, err
+		}
+		indexes[ref.Name] = index
+	}
+	return indexes, nil
+}
+
+func statusDefinitions(root string, cfg config.Config, lk lock.Lock, client library.Client) (map[string]map[string]model.Definition, error) {
+	defs := map[string]map[string]model.Definition{}
+	seen := map[string]bool{}
+	for _, mcp := range lk.MCPs {
+		if !statusHasRenderedTarget(root, mcp.Target) {
+			continue
+		}
+		key := mcp.Library + "/" + mcp.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		lib, ok := cfg.Library(mcp.Library)
+		if !ok {
+			continue
+		}
+		def, _, err := client.Definition(lib, mcp.Name)
+		if err != nil {
+			return nil, err
+		}
+		if defs[mcp.Library] == nil {
+			defs[mcp.Library] = map[string]model.Definition{}
+		}
+		defs[mcp.Library][mcp.Name] = def
+	}
+	return defs, nil
+}
+
+func statusHasRenderedTarget(root, target string) bool {
+	for _, name := range parseTargets(target) {
+		var path string
+		switch name {
+		case "claude":
+			path = filepath.Join(root, ".mcp.json")
+		case "codex":
+			path = filepath.Join(root, ".codex", "config.toml")
+		}
+		if path != "" {
+			if _, err := os.Stat(path); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func syncSecurityError(result graftsync.Result) error {

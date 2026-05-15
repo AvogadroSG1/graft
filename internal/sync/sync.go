@@ -220,7 +220,7 @@ func enforcePinForTargets(def model.Definition, target string, opts Options) (mo
 		if !handler.Detect(cfg.Command) {
 			return def, nil, fmt.Errorf("runtime %s does not match command %q", def.Pin.Runtime, cfg.Command)
 		}
-		installedVersion := installedRuntimeVersion(def.Pin.Runtime, cfg.Args)
+		installedVersion := pin.InstalledRuntimeVersion(def.Pin.Runtime, cfg.Args)
 		if err := handler.Validate(def.Pin, installedVersion); err != nil {
 			confirmation := opts.PinConfirmation
 			if opts.ForcePins && !errors.Is(err, pin.ErrInvalidPin) && opts.ConfirmPinMismatch != nil {
@@ -246,96 +246,6 @@ func enforcePinForTargets(def model.Definition, target string, opts Options) (mo
 		def.Adapters[name] = override
 	}
 	return def, nil, nil
-}
-
-func installedRuntimeVersion(runtime string, args []string) string {
-	switch runtime {
-	case "npm":
-		return npmArgVersion(args)
-	case "uv", "uvx":
-		return uvArgVersion(args)
-	case "docker":
-		return dockerArgDigest(args)
-	default:
-		return ""
-	}
-}
-
-func npmArgVersion(args []string) string {
-	for idx, arg := range args {
-		if strings.HasPrefix(arg, "--package=") || strings.HasPrefix(arg, "-p=") {
-			return npmPackageVersion(strings.SplitN(arg, "=", 2)[1])
-		}
-		if (arg == "--package" || arg == "-p") && idx+1 < len(args) {
-			return npmPackageVersion(args[idx+1])
-		}
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		if version := npmPackageVersion(arg); version != "" {
-			return version
-		}
-	}
-	return ""
-}
-
-func npmPackageVersion(arg string) string {
-	if strings.HasPrefix(arg, "@") {
-		if idx := strings.LastIndex(arg, "@"); idx > 0 {
-			return arg[idx+1:]
-		}
-		return ""
-	}
-	if idx := strings.LastIndex(arg, "@"); idx > 0 {
-		return arg[idx+1:]
-	}
-	return ""
-}
-
-func uvArgVersion(args []string) string {
-	skipNext := false
-	for idx, arg := range args {
-		if skipNext {
-			skipNext = false
-			continue
-		}
-		if strings.HasPrefix(arg, "--from=") {
-			return uvPackageVersion(strings.SplitN(arg, "=", 2)[1])
-		}
-		if arg == "--from" && idx+1 < len(args) {
-			return uvPackageVersion(args[idx+1])
-		}
-		if arg == "--with" || arg == "--python" || arg == "-p" {
-			skipNext = true
-			continue
-		}
-		if strings.HasPrefix(arg, "--with=") || strings.HasPrefix(arg, "--python=") || strings.HasPrefix(arg, "-p=") {
-			continue
-		}
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		if version := uvPackageVersion(arg); version != "" {
-			return version
-		}
-	}
-	return ""
-}
-
-func uvPackageVersion(arg string) string {
-	if idx := strings.Index(arg, "=="); idx >= 0 {
-		return arg[idx+2:]
-	}
-	return ""
-}
-
-func dockerArgDigest(args []string) string {
-	for _, arg := range args {
-		if idx := strings.Index(arg, "@sha256:"); idx >= 0 {
-			return arg[idx+1:]
-		}
-	}
-	return ""
 }
 
 func pinMismatchDiff(installedVersion string, pin model.Pin) string {

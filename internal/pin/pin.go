@@ -202,6 +202,28 @@ func (UVHandler) Inject(pin model.Pin, args []string) []string {
 	return next
 }
 
+// InstalledRuntimeVersion extracts the pinned runtime artifact version or digest from rendered args.
+func InstalledRuntimeVersion(runtime string, args []string) string {
+	switch runtime {
+	case "npm":
+		idx, prefix := firstPackageArg(args, map[string]bool{"--package": true, "-p": true}, map[string]bool{"--registry": true, "--cache": true, "--userconfig": true, "--tag": true, "--workspace": true, "-w": true})
+		if idx == -1 {
+			return ""
+		}
+		return npmPackageVersion(strings.TrimPrefix(args[idx], prefix))
+	case "uv", "uvx":
+		idx, prefix := firstPackageArg(args, map[string]bool{"--from": true}, map[string]bool{"--with": true, "--python": true, "-p": true})
+		if idx == -1 {
+			return ""
+		}
+		return uvPackageVersion(strings.TrimPrefix(args[idx], prefix))
+	case "docker":
+		return dockerArgDigest(args)
+	default:
+		return ""
+	}
+}
+
 func firstPackageArg(args []string, packageValueOptions map[string]bool, otherValueOptions map[string]bool) (int, string) {
 	skipNext := false
 argsLoop:
@@ -248,6 +270,19 @@ func dockerOptionConsumesValue(arg string) bool {
 	}
 }
 
+func npmPackageVersion(pkg string) string {
+	if strings.HasPrefix(pkg, "@") {
+		if idx := strings.LastIndex(pkg, "@"); idx > 0 {
+			return pkg[idx+1:]
+		}
+		return ""
+	}
+	if idx := strings.LastIndex(pkg, "@"); idx > 0 {
+		return pkg[idx+1:]
+	}
+	return ""
+}
+
 func packageWithVersion(pkg string, version string) string {
 	if strings.HasPrefix(pkg, "@") {
 		if idx := strings.LastIndex(pkg, "@"); idx > 0 {
@@ -259,6 +294,22 @@ func packageWithVersion(pkg string, version string) string {
 		return pkg[:idx] + "@" + version
 	}
 	return pkg + "@" + version
+}
+
+func uvPackageVersion(pkg string) string {
+	if idx := strings.Index(pkg, "=="); idx >= 0 {
+		return pkg[idx+2:]
+	}
+	return ""
+}
+
+func dockerArgDigest(args []string) string {
+	for _, arg := range args {
+		if idx := strings.Index(arg, "@sha256:"); idx >= 0 {
+			return arg[idx+1:]
+		}
+	}
+	return ""
 }
 
 func validNPMIntegrity(hash string) bool {

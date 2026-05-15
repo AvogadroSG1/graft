@@ -14,6 +14,7 @@ import (
 	librarymock "github.com/poconnor/graft/internal/library/mock"
 	"github.com/poconnor/graft/internal/lock"
 	"github.com/poconnor/graft/internal/model"
+	statuspkg "github.com/poconnor/graft/internal/status"
 	"go.uber.org/mock/gomock"
 )
 
@@ -103,6 +104,73 @@ func TestSyncCommandSavesPendingInputLock(t *testing.T) {
 	}
 }
 
+func TestStatusCommandJSONUsesLibraryIndex(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "url", CachePath: t.TempDir()}
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"docs":{"command":"npx","_graft_managed":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "url"}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core", DefinitionHash: "old", Target: "claude"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "2", SHA256: "new"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs"}, "new", nil)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetArgs([]string{"--json"})
+	var out bytes.Buffer
+	command.SetOut(&out)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout = %q, want JSON: %v", out.String(), err)
+	}
+	if decoded["state"] != "drifted" {
+		t.Fatalf("status JSON = %s, want drifted", out.String())
+	}
+}
+
+func TestStatusQuietConfiguredExitsZero(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "url", CachePath: t.TempDir()}
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"docs":{"command":"npx","_graft_managed":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "url"}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core", DefinitionHash: "same", Target: "claude"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1", SHA256: "same"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs"}, "same", nil)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetArgs([]string{"--quiet"})
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v, want configured zero exit", err)
+	}
+}
+
 func TestStatusCommandPrintsPendingInput(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -124,8 +192,56 @@ func TestStatusCommandPrintsPendingInput(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != "pending_input" {
-		t.Fatalf("status output = %q, want pending_input", got)
+	got := out.String()
+	for _, want := range []string{"STATE", "MCP", "INSTALLED", "LIBRARY", "pending_input", "docs", "graft sync"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestStatusCommandPrintsDriftTableWithVersions(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "url", CachePath: t.TempDir()}
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte(`{"mcpServers":{"docs":{"command":"npx","_graft_managed":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "url"}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1", DefinitionHash: "old", Target: "claude"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "2", SHA256: "new"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs"}, "new", nil)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	var out bytes.Buffer
+	command.SetOut(&out)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"STATE", "MCP", "INSTALLED", "LIBRARY", "drifted", "docs", "1", "2", "graft sync"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("status output = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestStatusRowStateMatchesExactMCPName(t *testing.T) {
+	t.Parallel()
+	result := statuspkg.Result{State: statuspkg.StateDrifted, Details: []string{"external edit: claude/docs is missing"}}
+	mcp := lock.InstalledMCP{Name: "doc", Library: "core"}
+	if got := statusRowState(result, nil, mcp); got != statuspkg.StateConfigured {
+		t.Fatalf("statusRowState() = %s, want configured for prefix-only match", got)
 	}
 }
 
