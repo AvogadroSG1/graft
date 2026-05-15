@@ -11,8 +11,10 @@ import (
 
 	"github.com/poconnor/graft/internal/config"
 	"github.com/poconnor/graft/internal/library"
+	librarymock "github.com/poconnor/graft/internal/library/mock"
 	"github.com/poconnor/graft/internal/lock"
 	"github.com/poconnor/graft/internal/model"
+	"go.uber.org/mock/gomock"
 )
 
 func TestInitCommandCreatesLockAndTargets(t *testing.T) {
@@ -124,6 +126,195 @@ func TestStatusCommandPrintsPendingInput(t *testing.T) {
 	}
 	if got := strings.TrimSpace(out.String()); got != "pending_input" {
 		t.Fatalf("status output = %q, want pending_input", got)
+	}
+}
+
+func TestStatusCommandPromptsToRegisterUnknownLockLibrary(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Add(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, lib config.Library) error {
+		if lib.Name != "core" || lib.URL != "https://example.com/core.git" || lib.CachePath == "" {
+			t.Fatalf("Add lib = %+v, want populated core library", lib)
+		}
+		return nil
+	})
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetIn(strings.NewReader("\n"))
+	var errOut bytes.Buffer
+	command.SetErr(&errOut)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(errOut.String(), "Register and clone") {
+		t.Fatalf("stderr = %q, want registration prompt", errOut.String())
+	}
+	got, err := (config.FileStore{}).Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lib, ok := got.Library("core")
+	if !ok || lib.URL != "https://example.com/core.git" || lib.CachePath == "" {
+		t.Fatalf("config library = %+v, %v; want registered core", lib, ok)
+	}
+}
+
+func TestStatusCommandDeclinesUnknownLockLibraryWithManualCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetIn(strings.NewReader("n\n"))
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "graft library add core https://example.com/core.git") {
+		t.Fatalf("Execute() error = %v, want manual library add command", err)
+	}
+}
+
+func TestStatusCommandEOFDeclinesUnknownLockLibraryWithoutClone(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetIn(strings.NewReader(""))
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "graft library add core https://example.com/core.git") {
+		t.Fatalf("Execute() error = %v, want manual library add command", err)
+	}
+	got, err := (config.FileStore{}).Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got.Library("core"); ok {
+		t.Fatalf("config = %+v, want no auto-registration on EOF", got)
+	}
+}
+
+func TestStatusCommandUnknownLockLibraryWithoutURLFailsBeforePrompt(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	var errOut bytes.Buffer
+	command.SetErr(&errOut)
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "does not include a URL") {
+		t.Fatalf("Execute() error = %v, want missing URL error", err)
+	}
+	if strings.Contains(errOut.String(), "Register and clone") {
+		t.Fatalf("stderr = %q, want no prompt", errOut.String())
+	}
+}
+
+func TestStatusQuietDoesNotPromptOrCloneUnknownLockLibrary(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
+		MCPs:      []lock.InstalledMCP{{Name: "docs", Library: "core"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetArgs([]string{"--quiet"})
+	command.SetIn(strings.NewReader("\n"))
+	var errOut bytes.Buffer
+	command.SetErr(&errOut)
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "unknown_library") {
+		t.Fatalf("Execute() error = %v, want unknown_library", err)
+	}
+	if strings.Contains(errOut.String(), "Register and clone") {
+		t.Fatalf("stderr = %q, want quiet no prompt", errOut.String())
+	}
+}
+
+func TestStatusJSONKeepsBootstrapPromptOffStdout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := (lock.FileStore{}).Save(root, lock.Lock{
+		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Add(gomock.Any(), gomock.Any()).Return(nil)
+	command := newStatusCommandWithDeps(&appOptions{configPath: cfgPath, root: root}, client)
+	command.SetArgs([]string{"--json"})
+	command.SetIn(strings.NewReader("\n"))
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	command.SetOut(&out)
+	command.SetErr(&errOut)
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.Contains(out.String(), "Register and clone") {
+		t.Fatalf("stdout = %q, want JSON only", out.String())
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("stdout = %q, want JSON: %v", out.String(), err)
+	}
+	if !strings.Contains(errOut.String(), "Register and clone") {
+		t.Fatalf("stderr = %q, want prompt", errOut.String())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -584,6 +585,10 @@ func newMCPPushCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 }
 
 func newStatusCommand(opts *appOptions) *cobra.Command {
+	return newStatusCommandWithDeps(opts, library.GitClient{})
+}
+
+func newStatusCommandWithDeps(opts *appOptions, client library.Client) *cobra.Command {
 	var quiet bool
 	var jsonOutput bool
 	cmd := &cobra.Command{
@@ -598,6 +603,12 @@ func newStatusCommand(opts *appOptions) *cobra.Command {
 			lk, err := (lock.FileStore{}).Load(opts.root)
 			if err != nil {
 				return err
+			}
+			if !quiet {
+				cfg, err = ensureLockLibrariesRegistered(cmd.Context(), cmd, opts, cfg, lk, client)
+				if err != nil {
+					return err
+				}
 			}
 			result := status.Resolve(opts.root, cfg, lk, map[string]model.LibraryIndex{})
 			if quiet {
@@ -633,6 +644,10 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 				return err
 			}
 			lk, err := (lock.FileStore{}).Load(opts.root)
+			if err != nil {
+				return err
+			}
+			cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
 			if err != nil {
 				return err
 			}
@@ -679,6 +694,67 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 	}
 	cmd.Flags().BoolVar(&noPull, "no-pull", false, "skip pulling libraries before sync")
 	return cmd
+}
+
+func ensureLockLibrariesRegistered(ctx context.Context, cmd *cobra.Command, opts *appOptions, cfg config.Config, lk lock.Lock, client library.Client) (config.Config, error) {
+	next := cfg
+	for _, ref := range lk.Libraries {
+		if _, ok := next.Library(ref.Name); ok {
+			continue
+		}
+		if ref.URL == "" {
+			return next, fmt.Errorf("library %q is not registered; graft.lock does not include a URL", ref.Name)
+		}
+		if err := eprintf(cmd, "Library %q from graft.lock is not registered: %s\nRegister and clone it now? [Y/n] ", ref.Name, ref.URL); err != nil {
+			return next, err
+		}
+		answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
+		if err != nil {
+			return next, err
+		}
+		if !acceptRegistration(answer, hasInput) {
+			return next, fmt.Errorf("library %q is not registered; run graft library add %s %s", ref.Name, ref.Name, ref.URL)
+		}
+		updated, err := next.WithLibrary(config.Library{Name: ref.Name, URL: ref.URL})
+		if err != nil {
+			return next, err
+		}
+		lib, _ := updated.Library(ref.Name)
+		if err := client.Add(ctx, lib); err != nil {
+			return next, err
+		}
+		if err := saveConfig(opts.configPath, updated); err != nil {
+			return next, err
+		}
+		next = updated
+	}
+	return next, nil
+}
+
+func readPromptAnswer(input io.Reader) (string, bool, error) {
+	answer, err := bufio.NewReader(input).ReadString('\n')
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			if answer == "" {
+				return "", false, nil
+			}
+			return strings.TrimSpace(answer), true, nil
+		}
+		return "", false, err
+	}
+	return strings.TrimSpace(answer), true, nil
+}
+
+func acceptRegistration(answer string, hasInput bool) bool {
+	if !hasInput {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "", "y", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 func syncPullLibraries(cfg config.Config, lk lock.Lock, names []string) ([]config.Library, error) {
@@ -769,12 +845,16 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			if len(cfg.Libraries) == 0 {
-				return fmt.Errorf("no libraries configured")
-			}
 			lk, err := (lock.FileStore{}).Load(opts.root)
 			if err != nil {
 				return err
+			}
+			cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
+			if err != nil {
+				return err
+			}
+			if len(cfg.Libraries) == 0 {
+				return fmt.Errorf("no libraries configured")
 			}
 			if len(lk.Libraries) == 0 {
 				return fmt.Errorf("run graft init with a library first")

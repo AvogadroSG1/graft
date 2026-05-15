@@ -71,6 +71,44 @@ func TestSyncCommandNoPullSkipsLibraryPull(t *testing.T) {
 	}
 }
 
+func TestSyncCommandRegistersUnknownLockLibraryBeforePull(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cfgPath := writeSyncConfig(t)
+	url := "https://example.com/core.git"
+	writeSyncLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: url}}, MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}})
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Add(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, lib config.Library) error {
+		if lib.Name != "core" || lib.URL != url || lib.CachePath == "" {
+			t.Fatalf("Add lib = %+v, want populated core library", lib)
+		}
+		return nil
+	})
+	client.EXPECT().Pull(gomock.Any(), gomock.Any()).DoAndReturn(func(_ context.Context, lib config.Library) (string, error) {
+		if lib.Name != "core" || lib.URL != url || lib.CachePath == "" {
+			t.Fatalf("Pull lib = %+v, want registered core library", lib)
+		}
+		return "commit-sha", nil
+	})
+	client.EXPECT().Definition(gomock.Any(), "docs").DoAndReturn(func(lib config.Library, name string) (model.Definition, string, error) {
+		if lib.Name != "core" || name != "docs" {
+			t.Fatalf("Definition(%+v, %q), want core docs", lib, name)
+		}
+		return model.Definition{Name: "docs", Version: "2", Command: "npx"}, "new", nil
+	})
+	adapter := &syncRecordingAdapter{}
+	command := newSyncCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, []render.AdapterByName{{Name: "claude", Adapter: adapter}})
+	command.SetIn(strings.NewReader("\n"))
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if adapter.def.Name != "docs" {
+		t.Fatalf("rendered = %+v, want docs", adapter.def)
+	}
+}
+
 func TestSyncCommandPullsOnlyLibrariesForSelectedMCPs(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
