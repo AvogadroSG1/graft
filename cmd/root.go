@@ -22,6 +22,7 @@ import (
 	"github.com/poconnor/graft/internal/render"
 	"github.com/poconnor/graft/internal/status"
 	graftsync "github.com/poconnor/graft/internal/sync"
+	"github.com/poconnor/graft/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -700,6 +701,59 @@ func newPickCommand(opts *appOptions) *cobra.Command {
 			return println(cmd, "interactive picker ready")
 		},
 	}
+}
+
+type pickListResult struct {
+	Items    []tui.PickItem
+	Warnings []string
+}
+
+func buildPickList(cfg config.Config, client library.Client) (pickListResult, error) {
+	items := []tui.PickItem{}
+	warnings := []string{}
+	seen := map[string]string{}
+	for _, lib := range cfg.Libraries {
+		index, err := client.Index(lib)
+		if err != nil {
+			return pickListResult{}, fmt.Errorf("index library %q: %w", lib.Name, err)
+		}
+		for _, entry := range index.MCPs {
+			if prior, ok := seen[entry.Name]; ok {
+				warnings = append(warnings, fmt.Sprintf("duplicate MCP name %q in libraries %s and %s", entry.Name, prior, lib.Name))
+			} else {
+				seen[entry.Name] = lib.Name
+			}
+			items = append(items, tui.PickItem{Entry: entry, Library: lib.Name})
+		}
+	}
+	return pickListResult{Items: items, Warnings: warnings}, nil
+}
+
+func applyPickResult(lk lock.Lock, results []tui.PickItem, target string) (lock.Lock, error) {
+	libraries := map[string]bool{}
+	for _, lib := range lk.Libraries {
+		libraries[lib.Name] = true
+	}
+	seenNames := map[string]bool{}
+	next := lk
+	next.MCPs = []lock.InstalledMCP{}
+	for _, result := range results {
+		if !libraries[result.Library] {
+			return lk, fmt.Errorf("library %q is not in graft.lock", result.Library)
+		}
+		if seenNames[result.Entry.Name] {
+			return lk, fmt.Errorf("duplicate MCP name %q selected; rendered targets are keyed by name", result.Entry.Name)
+		}
+		seenNames[result.Entry.Name] = true
+		next.MCPs = append(next.MCPs, lock.InstalledMCP{
+			Name:           result.Entry.Name,
+			Library:        result.Library,
+			Version:        result.Entry.Version,
+			DefinitionHash: result.Entry.SHA256,
+			Target:         target,
+		})
+	}
+	return next, nil
 }
 
 func loadConfig(path string) (config.Config, error) {
