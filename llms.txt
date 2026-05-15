@@ -46,9 +46,9 @@ graft pick                              Interactive TUI to browse and select MCP
 | `internal/model` | Shared domain types: `Pin`, MCP definition structs, stdio/SSE/HTTP transport fields |
 | `internal/pin` | Enforces reproducible version pins — validates sha512 (npm), sha256 digest (Docker), sha256 hash (uvx) |
 | `internal/render` | Writes resolved stdio/SSE/HTTP MCP definitions into `.mcp.json` and `.codex/config.toml` |
-| `internal/status` | Computes and reports project drift state |
-| `internal/sync` | Orchestrates a full sync: resolves pins, calls render, updates lock |
-| `internal/migrate` | Parses existing `.mcp.json` and `.codex/config.toml` files for import |
+| `internal/status` | Computes and reports project drift state, including `pending_input` from `graft.lock` |
+| `internal/sync` | Orchestrates a full sync: resolves pins, applies definition migrations, calls render, updates lock |
+| `internal/migrate` | Resolves versioned migration chains and applies `rename`, `set_default`, and `require_input` steps |
 | `internal/hooks` | Installs and uninstalls the zshrc `cd` alias and git `post-checkout` hook |
 | `internal/tui` | Bubbletea TUI model for `graft pick` — interactive MCP selection |
 | `internal/fileutil` | Shared file utilities (atomic writes) |
@@ -69,6 +69,7 @@ graft pick                              Interactive TUI to browse and select MCP
 - Remote `sse` and `http` definitions use `url`; Claude render also writes redacted `headers`.
 - `graft library migrate-from-claude` redacts env and header values as `${KEY}` placeholders before writing library JSON or committing the local library.
 - `graft mcp import --from` also placeholder-redacts literal env/header values from imported Claude JSON or Codex TOML.
+- Definition schema migrations live in `migrations/<mcp>/<from>-to-<to>.json` inside a library. `graft sync` applies `rename` and `set_default` steps automatically, skips unresolved `require_input` steps, persists `pending_input` in `graft.lock`, and lets `graft status` surface that state.
 
 ## Build and Test
 
