@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
@@ -489,12 +490,28 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			reader := bufio.NewReader(cmd.InOrStdin())
 			for _, def := range defs {
-				if _, err := library.WriteDefinition(lib, def); err != nil {
+				if hasAuthFields(def) {
+					answer, err := promptLine(cmd, reader, fmt.Sprintf("Import auth placeholders for %s? [y/N] ", def.Name))
+					if err != nil {
+						return err
+					}
+					if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+						if err := printf(cmd, "skipped %s\n", def.Name); err != nil {
+							return err
+						}
+						continue
+					}
+				}
+				written, err := writeImportedDefinition(cmd, reader, lib, def)
+				if err != nil {
 					return err
 				}
-				if err := printf(cmd, "imported %s\n", def.Name); err != nil {
-					return err
+				if written {
+					if err := printf(cmd, "imported %s\n", def.Name); err != nil {
+						return err
+					}
 				}
 			}
 			_, err = (library.GitClient{}).Reindex(lib)
@@ -505,10 +522,131 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 	return cmd
 }
 
+func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
+	if _, err := library.WriteDefinition(lib, def); err == nil {
+		return true, nil
+	} else if !strings.Contains(err.Error(), "already exists") {
+		return false, err
+	}
+	for {
+		choice, err := promptLine(cmd, reader, fmt.Sprintf("MCP %s exists; choose keep/use-new/editor/skip: ", def.Name))
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(choice) {
+		case "keep", "k":
+			return false, printf(cmd, "kept %s\n", def.Name)
+		case "use-new", "u":
+			_, err := library.WriteDefinitionFile(lib, def, true)
+			return err == nil, err
+		case "editor", "e":
+			edited, err := editDefinitionCandidate(cmd, def)
+			if err != nil {
+				return false, err
+			}
+			_, err = library.WriteDefinitionFile(lib, edited, true)
+			return err == nil, err
+		case "skip", "s":
+			return false, printf(cmd, "skipped %s\n", def.Name)
+		}
+	}
+}
+
+func editDefinitionCandidate(cmd *cobra.Command, def model.Definition) (model.Definition, error) {
+	library.NormalizeDefinition(&def)
+	data, err := json.MarshalIndent(def, "", "  ")
+	if err != nil {
+		return model.Definition{}, err
+	}
+	tmp, err := os.CreateTemp("", def.Name+"-*.json")
+	if err != nil {
+		return model.Definition{}, err
+	}
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(append(data, '\n')); err != nil {
+		_ = tmp.Close()
+		return model.Definition{}, err
+	}
+	if err := tmp.Close(); err != nil {
+		return model.Definition{}, err
+	}
+	if err := runEditor(cmd, tmp.Name()); err != nil {
+		return model.Definition{}, err
+	}
+	edited, err := readDefinitionFile(tmp.Name())
+	if err != nil {
+		return model.Definition{}, err
+	}
+	if edited.Name != def.Name {
+		return model.Definition{}, fmt.Errorf("edited definition name %q does not match %q", edited.Name, def.Name)
+	}
+	return edited, nil
+}
+
+func readDefinitionFile(path string) (model.Definition, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return model.Definition{}, err
+	}
+	var def model.Definition
+	if err := json.Unmarshal(data, &def); err != nil {
+		return model.Definition{}, err
+	}
+	return def, nil
+}
+
+func hasAuthFields(def model.Definition) bool {
+	return len(def.Env) > 0 || len(def.Headers) > 0
+}
+
+func promptLine(cmd *cobra.Command, reader *bufio.Reader, prompt string) (string, error) {
+	if err := eprintf(cmd, "%s", prompt); err != nil {
+		return "", err
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if err == io.EOF && line == "" {
+		return "", fmt.Errorf("input required")
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func runEditor(cmd *cobra.Command, path string) error {
+	editor := os.Getenv("GRAFT_EDITOR")
+	if editor == "" {
+		editor = "/usr/bin/pico"
+	}
+	run := exec.Command(editor, path)
+	run.Stdin = cmd.InOrStdin()
+	run.Stdout = cmd.OutOrStdout()
+	run.Stderr = cmd.ErrOrStderr()
+	if err := run.Run(); err != nil {
+		return fmt.Errorf("run editor: %w", err)
+	}
+	return nil
+}
+
 func newMCPAddCommand(opts *appOptions) *cobra.Command {
 	var command string
 	var description string
 	var version string
+	var transportType string
+	var argsText string
+	var tagsText string
 	cmd := &cobra.Command{
 		Use:   "add <name>",
 		Short: "Add a definition to the default library",
@@ -522,7 +660,49 @@ func newMCPAddCommand(opts *appOptions) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no default library configured")
 			}
-			def := model.Definition{Name: args[0], Version: version, Description: description, Command: command, Args: []string{}, Env: map[string]string{}}
+			if !mcpAddFlagChanged(cmd) {
+				reader := bufio.NewReader(cmd.InOrStdin())
+				if description == "" {
+					description, err = promptLine(cmd, reader, "Description: ")
+					if err != nil {
+						return err
+					}
+				}
+				if version == "" {
+					version, err = promptLine(cmd, reader, "Version [0.1.0]: ")
+					if err != nil {
+						return err
+					}
+				}
+				if transportType == "" {
+					transportType, err = promptLine(cmd, reader, "Type [stdio/http/sse]: ")
+					if err != nil {
+						return err
+					}
+				}
+				if command == "" {
+					command, err = promptLine(cmd, reader, "Command: ")
+					if err != nil {
+						return err
+					}
+				}
+				if argsText == "" {
+					argsText, err = promptLine(cmd, reader, "Args: ")
+					if err != nil {
+						return err
+					}
+				}
+				if tagsText == "" {
+					tagsText, err = promptLine(cmd, reader, "Tags: ")
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if version == "" {
+				version = "0.1.0"
+			}
+			def := model.Definition{Name: args[0], Version: version, Description: description, Type: transportType, Command: command, Args: strings.Fields(argsText), Tags: splitCSV(tagsText), Env: map[string]string{}, Headers: map[string]string{}}
 			if _, err := library.WriteDefinition(lib, def); err != nil {
 				return err
 			}
@@ -532,8 +712,20 @@ func newMCPAddCommand(opts *appOptions) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&command, "command", "", "command to run")
 	cmd.Flags().StringVar(&description, "description", "", "description")
-	cmd.Flags().StringVar(&version, "version", "0.1.0", "definition version")
+	cmd.Flags().StringVar(&version, "version", "", "definition version")
+	cmd.Flags().StringVar(&transportType, "type", "", "transport type")
+	cmd.Flags().StringVar(&argsText, "args", "", "command args")
+	cmd.Flags().StringVar(&tagsText, "tags", "", "comma-separated tags")
 	return cmd
+}
+
+func mcpAddFlagChanged(cmd *cobra.Command) bool {
+	for _, name := range []string{"command", "description", "version", "type", "args", "tags"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
 }
 
 func newMCPEditCommand(opts *appOptions) *cobra.Command {
@@ -550,8 +742,22 @@ func newMCPEditCommand(opts *appOptions) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no default library configured")
 			}
+			if err := library.ValidateMCPName(args[0]); err != nil {
+				return err
+			}
 			path := filepath.Join(lib.CachePath, "mcps", args[0]+".json")
-			return printf(cmd, "edit %s\n", path)
+			if err := runEditor(cmd, path); err != nil {
+				return err
+			}
+			def, _, err := (library.GitClient{}).Definition(lib, args[0])
+			if err != nil {
+				return err
+			}
+			if def.Name != args[0] {
+				return fmt.Errorf("edited definition name %q does not match %q", def.Name, args[0])
+			}
+			_, err = (library.GitClient{}).Reindex(lib)
+			return err
 		},
 	}
 }
@@ -574,11 +780,24 @@ func newMCPPushCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no default library configured")
 			}
-			if _, err := (library.GitClient{}).Reindex(lib); err != nil {
+			client := library.GitClient{}
+			if _, err := client.Reindex(lib); err != nil {
 				return err
 			}
-			_ = ctx
-			return println(cmd, "library reindexed; commit push delegated to git")
+			diff, err := client.Diff(ctx, lib.CachePath)
+			if err != nil {
+				return err
+			}
+			if diff != "" {
+				if err := printf(cmd, "%s", diff); err != nil {
+					return err
+				}
+			}
+			sha, err := client.PushAll(ctx, lib.CachePath, "feat(mcps): update library definitions")
+			if err != nil {
+				return err
+			}
+			return printf(cmd, "commit %s\n", sha)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm non-interactive push")

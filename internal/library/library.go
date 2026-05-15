@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -156,6 +157,59 @@ func (GitClient) Reindex(lib config.Library) (model.LibraryIndex, error) {
 		return index, err
 	}
 	return index, nil
+}
+
+// Diff stages library-managed files and returns the exact diff that push will commit.
+func (c GitClient) Diff(ctx context.Context, cachePath string) (string, error) {
+	if err := c.stageLibraryFiles(ctx, cachePath); err != nil {
+		return "", err
+	}
+	gitCtx, cancel := c.commandContext(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(gitCtx, c.gitPath(), "-C", cachePath, "diff", "--cached", "--", "library.json", "mcps")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --cached: %w", err)
+	}
+	return string(out), nil
+}
+
+// PushAll stages library files, commits staged changes when present, pushes, and returns HEAD.
+func (c GitClient) PushAll(ctx context.Context, cachePath, message string) (string, error) {
+	if err := c.stageLibraryFiles(ctx, cachePath); err != nil {
+		return "", err
+	}
+	changed, err := c.hasStagedChanges(ctx, cachePath)
+	if err != nil {
+		return "", err
+	}
+	if changed {
+		if err := c.runGit(ctx, cachePath, "commit", "-m", message, "--", "library.json", "mcps"); err != nil {
+			return "", err
+		}
+	}
+	if err := c.runGit(ctx, cachePath, "push", "-u", "origin", "HEAD"); err != nil {
+		return "", err
+	}
+	return c.gitSHA(ctx, cachePath)
+}
+
+func (c GitClient) stageLibraryFiles(ctx context.Context, cachePath string) error {
+	return c.runGit(ctx, cachePath, "add", "library.json", "mcps")
+}
+
+func (c GitClient) hasStagedChanges(ctx context.Context, cachePath string) (bool, error) {
+	gitCtx, cancel := c.commandContext(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(gitCtx, c.gitPath(), "-C", cachePath, "diff", "--cached", "--quiet", "--", "library.json", "mcps")
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return true, nil
+		}
+		return false, fmt.Errorf("git diff --cached --quiet: %w", err)
+	}
+	return false, nil
 }
 
 func (c GitClient) gitSHA(ctx context.Context, path string) (string, error) {
