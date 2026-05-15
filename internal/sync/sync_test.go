@@ -43,6 +43,190 @@ func TestApplyMarksPendingInputWhenMigrationRequiresInput(t *testing.T) {
 	}
 }
 
+func TestApplyWarnsAndRendersUnknownPinRuntime(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "custom", Args: []string{"run"}, Pin: model.Pin{Runtime: "custom", Version: "1.0.0", Hash: "sha256:abc"}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if !adapter.rendered {
+		t.Fatal("Apply() did not render unknown pin runtime")
+	}
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("Apply() succeeded = %+v, want docs", result.Succeeded)
+	}
+	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "no pin handler for runtime custom") {
+		t.Fatalf("Apply() warnings = %+v, want unknown runtime warning", result.Warnings)
+	}
+	if got := strings.Join(adapter.def.Args, " "); got != "run" {
+		t.Fatalf("rendered args = %q, want unmodified", got)
+	}
+}
+
+func TestApplyAllowsDifferentMCPAndRuntimeVersionsWhenArgsAreUnpinned(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "0.2.0", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "0.2.0", Command: "npx", Args: []string{"pkg"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("Apply() succeeded = %+v, errors = %+v; want docs", result.Succeeded, result.Errors)
+	}
+	if got := adapter.def.Adapter("claude").Args[0]; got != "pkg@2.0.0" {
+		t.Fatalf("rendered arg = %q, want package pinned", got)
+	}
+}
+
+func TestApplyFailsPinRuntimeCommandMismatch(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "docker", Args: []string{"run", "ghcr.io/acme/tool"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered mismatched pin runtime and command")
+	}
+	if len(result.Failed) != 1 || !strings.Contains(result.Errors[0], "does not match command") {
+		t.Fatalf("Apply() failed = %+v errors = %+v, want command mismatch", result.Failed, result.Errors)
+	}
+}
+
+func TestApplyPinsAdapterOverrideArgs(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := ApplyWithOptions(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{
+			Name:    "docs",
+			Version: "2",
+			Command: "npx",
+			Args:    []string{"top"},
+			Pin:     model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash},
+			Adapters: map[string]model.AdapterConfig{
+				"claude": {Command: "npx", Args: []string{"pkg@1.0.0"}},
+			},
+		}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+		Options{ForcePins: true, PinConfirmation: "I understand the risk"},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("ApplyWithOptions() succeeded = %+v errors = %+v, want docs", result.Succeeded, result.Errors)
+	}
+	if got := adapter.def.Adapter("claude").Args[0]; got != "pkg@2.0.0" {
+		t.Fatalf("adapter arg = %q, want adapter override pinned", got)
+	}
+}
+
+func TestApplyHardBlocksPackageEqualsVersionMismatchWithoutForce(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx", Args: []string{"--package=pkg@1.0.0", "server"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered --package mismatch without force")
+	}
+	if len(result.Failed) != 1 || !strings.Contains(result.Errors[0], "pin mismatch") {
+		t.Fatalf("Apply() failed = %+v errors = %+v, want pin mismatch", result.Failed, result.Errors)
+	}
+}
+
+func TestApplyUVVersionInferenceSkipsWithDependency(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	hash := "sha256:" + strings.Repeat("a", 64)
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "uvx", Args: []string{"--with", "dep==1.0.0", "tool==2.0.0"}, Pin: model.Pin{Runtime: "uvx", Version: "2.0.0", Hash: hash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("Apply() succeeded = %+v errors = %+v, want docs", result.Succeeded, result.Errors)
+	}
+	if got := adapter.def.Adapter("claude").Args[2]; got != "tool==2.0.0" {
+		t.Fatalf("tool arg = %q, want existing pinned tool", got)
+	}
+}
+
+func TestApplyHardBlocksUVFromEqualsVersionMismatchWithoutForce(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	hash := "sha256:" + strings.Repeat("f", 64)
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "uvx", Args: []string{"--from=toolbox==1.0.0", "toolbox"}, Pin: model.Pin{Runtime: "uvx", Version: "2.0.0", Hash: hash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered --from mismatch without force")
+	}
+	if len(result.Failed) != 1 || !strings.Contains(result.Errors[0], "pin mismatch") {
+		t.Fatalf("Apply() failed = %+v errors = %+v, want pin mismatch", result.Failed, result.Errors)
+	}
+}
+
+func TestApplyHardBlocksPinMismatchWithoutForce(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1.0.0", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"pkg@1.0.0"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if adapter.rendered {
+		t.Fatal("Apply() rendered pin mismatch without force")
+	}
+	if len(result.Failed) != 1 || result.Failed[0] != "docs" {
+		t.Fatalf("Apply() failed = %+v, want docs", result.Failed)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "pin mismatch") {
+		t.Fatalf("Apply() errors = %+v, want pin mismatch", result.Errors)
+	}
+}
+
+func TestApplyForcePinMismatchWithConfirmation(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := ApplyWithOptions(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1.0.0", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"pkg@1.0.0"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+		Options{ForcePins: true, PinConfirmation: "I understand the risk"},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("ApplyWithOptions() succeeded = %+v, errors = %+v; want docs", result.Succeeded, result.Errors)
+	}
+	if got := adapter.def.Args[0]; got != "pkg@2.0.0" {
+		t.Fatalf("rendered arg = %q, want forced pinned package", got)
+	}
+}
+
 func TestApplyFailsDefinitionErrorsInsteadOfSkipping(t *testing.T) {
 	t.Parallel()
 	lib := testLibrary(t)
@@ -419,6 +603,8 @@ func (a *recordingAdapter) Remove(string) error {
 func (a *recordingAdapter) TargetFile() string {
 	return ""
 }
+
+const validNPMIntegrityHash = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
 
 var errRenderFailed = errors.New("render failed")
 var errRestoreFailed = errors.New("restore failed")

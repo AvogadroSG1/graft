@@ -30,6 +30,12 @@ type Result struct {
 type Options struct {
 	// Names limits sync processing to installed MCPs with matching names.
 	Names []string
+	// ForcePins allows a valid pin mismatch when a confirmation phrase is supplied.
+	ForcePins bool
+	// PinConfirmation is the pre-supplied phrase used when ConfirmPinMismatch is nil.
+	PinConfirmation string
+	// ConfirmPinMismatch prompts for confirmation after a concrete pin mismatch is known.
+	ConfirmPinMismatch func(diff string) (string, error)
 }
 
 // Apply iterates over the MCPs in the lock file, fetches each definition from the library,
@@ -104,19 +110,14 @@ func ApplyWithOptions(lk lock.Lock, cfg config.Config, client library.Client, ad
 			continue
 		}
 		if def.Pin.Runtime != "" {
-			registry := pin.NewRegistry()
-			handler, ok := registry.Handler(def.Command)
-			if !ok {
-				result.Failed = append(result.Failed, mcp.Name)
-				result.Errors = append(result.Errors, fmt.Sprintf("%s: pin: no handler for command %q", mcp.Name, def.Command))
-				continue
-			}
-			if err := pin.Enforce(handler, def.Pin, mcp.Version, false, ""); err != nil {
+			pinned, warnings, err := enforcePinForTargets(def, mcp.Target, opts)
+			if err != nil {
 				result.Failed = append(result.Failed, mcp.Name)
 				result.Errors = append(result.Errors, fmt.Sprintf("%s: pin: %v", mcp.Name, err))
 				continue
 			}
-			def.Args = handler.Inject(def.Pin, def.Args)
+			result.Warnings = append(result.Warnings, warnings...)
+			def = pinned
 		}
 		if err := renderTarget(mcp.Target, def, adapters); err != nil {
 			result.Failed = append(result.Failed, mcp.Name)
@@ -206,6 +207,142 @@ func credentialMapHasSensitiveFields(values map[string]string) bool {
 		}
 	}
 	return false
+}
+
+func enforcePinForTargets(def model.Definition, target string, opts Options) (model.Definition, []string, error) {
+	registry := pin.NewRegistry()
+	handler, ok := registry.HandlerForRuntime(def.Pin.Runtime)
+	if !ok {
+		return def, []string{fmt.Sprintf("no pin handler for runtime %s; MCP will run unpinned", def.Pin.Runtime)}, nil
+	}
+	for idx, name := range renderTargetList(target) {
+		cfg := def.Adapter(name)
+		if !handler.Detect(cfg.Command) {
+			return def, nil, fmt.Errorf("runtime %s does not match command %q", def.Pin.Runtime, cfg.Command)
+		}
+		installedVersion := installedRuntimeVersion(def.Pin.Runtime, cfg.Args)
+		if err := handler.Validate(def.Pin, installedVersion); err != nil {
+			confirmation := opts.PinConfirmation
+			if opts.ForcePins && !errors.Is(err, pin.ErrInvalidPin) && opts.ConfirmPinMismatch != nil {
+				var confirmErr error
+				confirmation, confirmErr = opts.ConfirmPinMismatch(pinMismatchDiff(installedVersion, def.Pin))
+				if confirmErr != nil {
+					return def, nil, confirmErr
+				}
+			}
+			if err := pin.Enforce(handler, def.Pin, installedVersion, opts.ForcePins, confirmation); err != nil {
+				return def, nil, err
+			}
+		}
+		injected := handler.Inject(def.Pin, cfg.Args)
+		if idx == 0 {
+			def.Args = append([]string{}, injected...)
+		}
+		if def.Adapters == nil {
+			def.Adapters = map[string]model.AdapterConfig{}
+		}
+		override := def.Adapters[name]
+		override.Args = append([]string{}, injected...)
+		def.Adapters[name] = override
+	}
+	return def, nil, nil
+}
+
+func installedRuntimeVersion(runtime string, args []string) string {
+	switch runtime {
+	case "npm":
+		return npmArgVersion(args)
+	case "uv", "uvx":
+		return uvArgVersion(args)
+	case "docker":
+		return dockerArgDigest(args)
+	default:
+		return ""
+	}
+}
+
+func npmArgVersion(args []string) string {
+	for idx, arg := range args {
+		if strings.HasPrefix(arg, "--package=") || strings.HasPrefix(arg, "-p=") {
+			return npmPackageVersion(strings.SplitN(arg, "=", 2)[1])
+		}
+		if (arg == "--package" || arg == "-p") && idx+1 < len(args) {
+			return npmPackageVersion(args[idx+1])
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if version := npmPackageVersion(arg); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func npmPackageVersion(arg string) string {
+	if strings.HasPrefix(arg, "@") {
+		if idx := strings.LastIndex(arg, "@"); idx > 0 {
+			return arg[idx+1:]
+		}
+		return ""
+	}
+	if idx := strings.LastIndex(arg, "@"); idx > 0 {
+		return arg[idx+1:]
+	}
+	return ""
+}
+
+func uvArgVersion(args []string) string {
+	skipNext := false
+	for idx, arg := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		if strings.HasPrefix(arg, "--from=") {
+			return uvPackageVersion(strings.SplitN(arg, "=", 2)[1])
+		}
+		if arg == "--from" && idx+1 < len(args) {
+			return uvPackageVersion(args[idx+1])
+		}
+		if arg == "--with" || arg == "--python" || arg == "-p" {
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--with=") || strings.HasPrefix(arg, "--python=") || strings.HasPrefix(arg, "-p=") {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if version := uvPackageVersion(arg); version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func uvPackageVersion(arg string) string {
+	if idx := strings.Index(arg, "=="); idx >= 0 {
+		return arg[idx+2:]
+	}
+	return ""
+}
+
+func dockerArgDigest(args []string) string {
+	for _, arg := range args {
+		if idx := strings.Index(arg, "@sha256:"); idx >= 0 {
+			return arg[idx+1:]
+		}
+	}
+	return ""
+}
+
+func pinMismatchDiff(installedVersion string, pin model.Pin) string {
+	if installedVersion == "" {
+		installedVersion = "<none>"
+	}
+	return fmt.Sprintf("installed runtime version: %s\npinned runtime version: %s\npinned hash: %s", installedVersion, pin.Version, pin.Hash)
 }
 
 func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) error {

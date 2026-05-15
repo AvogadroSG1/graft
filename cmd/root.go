@@ -634,6 +634,7 @@ func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 
 func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, adapters []render.AdapterByName) *cobra.Command {
 	var noPull bool
+	var forcePins bool
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Apply library updates to selected MCPs",
@@ -684,16 +685,41 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 				cfg,
 				client,
 				activeAdapters,
-				graftsync.Options{Names: args},
+				graftsync.Options{Names: args, ForcePins: forcePins, ConfirmPinMismatch: func(diff string) (string, error) {
+					if err := eprintf(cmd, "SECURITY WARNING: pin mismatch detected.\n%s\nType 'I understand the risk' to continue: ", diff); err != nil {
+						return "", err
+					}
+					answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
+					if err != nil {
+						return "", err
+					}
+					if !hasInput {
+						return "", fmt.Errorf("SECURITY WARNING: forced pin mismatch requires confirmation phrase")
+					}
+					return answer, nil
+				}},
 			)
 			if err := (lock.FileStore{}).Save(opts.root, result.Lock); err != nil {
 				return err
 			}
-			return writeValue(cmd, true, result)
+			if err := writeValue(cmd, true, result); err != nil {
+				return err
+			}
+			return syncSecurityError(result)
 		},
 	}
 	cmd.Flags().BoolVar(&noPull, "no-pull", false, "skip pulling libraries before sync")
+	cmd.Flags().BoolVar(&forcePins, "force", false, "force pin mismatch after typing the risk confirmation phrase")
 	return cmd
+}
+
+func syncSecurityError(result graftsync.Result) error {
+	for _, errText := range result.Errors {
+		if strings.Contains(errText, "pin:") {
+			return fmt.Errorf("%s", errText)
+		}
+	}
+	return nil
 }
 
 func ensureLockLibrariesRegistered(ctx context.Context, cmd *cobra.Command, opts *appOptions, cfg config.Config, lk lock.Lock, client library.Client) (config.Config, error) {

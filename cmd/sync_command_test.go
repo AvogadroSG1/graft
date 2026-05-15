@@ -71,6 +71,52 @@ func TestSyncCommandNoPullSkipsLibraryPull(t *testing.T) {
 	}
 }
 
+func TestSyncCommandForcePinMismatchRequiresPhrase(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: t.TempDir()}
+	cfgPath := writeSyncConfig(t, lib)
+	writeSyncLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1.0.0", DefinitionHash: "old", Target: "claude"}}})
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"pkg@1.0.0"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, "new", nil)
+	command := newSyncCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, []render.AdapterByName{{Name: "claude", Adapter: &syncRecordingAdapter{}}})
+	command.SetArgs([]string{"--no-pull", "--force"})
+	command.SetIn(strings.NewReader("nope\n"))
+	var errOut bytes.Buffer
+	command.SetErr(&errOut)
+
+	err := command.Execute()
+	if err == nil || !strings.Contains(err.Error(), "SECURITY WARNING") {
+		t.Fatalf("Execute() error = %v, want security warning", err)
+	}
+	if !strings.Contains(errOut.String(), "installed runtime version: 1.0.0") || !strings.Contains(errOut.String(), "pinned runtime version: 2.0.0") {
+		t.Fatalf("stderr = %q, want pin diff", errOut.String())
+	}
+}
+
+func TestSyncCommandForcePinMismatchWithPhraseRenders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: t.TempDir()}
+	cfgPath := writeSyncConfig(t, lib)
+	writeSyncLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "1.0.0", DefinitionHash: "old", Target: "claude"}}})
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"pkg@1.0.0"}, Pin: model.Pin{Runtime: "npm", Version: "2.0.0", Hash: validNPMIntegrityHash}}, "new", nil)
+	adapter := &syncRecordingAdapter{}
+	command := newSyncCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, []render.AdapterByName{{Name: "claude", Adapter: adapter}})
+	command.SetArgs([]string{"--no-pull", "--force"})
+	command.SetIn(strings.NewReader("I understand the risk\n"))
+
+	if err := command.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := adapter.def.Args[0]; got != "pkg@2.0.0" {
+		t.Fatalf("rendered arg = %q, want forced pinned package", got)
+	}
+}
+
 func TestSyncCommandRegistersUnknownLockLibraryBeforePull(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -216,6 +262,8 @@ func writeSyncLock(t *testing.T, root string, lk lock.Lock) {
 		t.Fatal(err)
 	}
 }
+
+const validNPMIntegrityHash = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
 
 type syncRecordingAdapter struct {
 	def model.Definition
