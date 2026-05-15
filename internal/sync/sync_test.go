@@ -3,8 +3,10 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/poconnor/graft/internal/config"
@@ -69,6 +71,66 @@ func TestApplyRunsAutomaticMigrationStepsBeforeRender(t *testing.T) {
 	}
 }
 
+func TestApplyRendersBothTargets(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	claude := &recordingAdapter{}
+	codex := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "both"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: claude}, {Name: "codex", Adapter: codex}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("Apply() succeeded = %+v, want docs", result.Succeeded)
+	}
+	if !claude.rendered || !codex.rendered {
+		t.Fatalf("rendered targets: claude=%v codex=%v, want both", claude.rendered, codex.rendered)
+	}
+}
+
+func TestApplyRollsBackBothTargetsWhenLaterRenderFails(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	claude := &recordingAdapter{rendered: true, def: model.Definition{Name: "previous"}}
+	codex := &recordingAdapter{err: errRenderFailed}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "both"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: claude}, {Name: "codex", Adapter: codex}},
+	)
+	if len(result.Failed) != 1 || result.Failed[0] != "docs" {
+		t.Fatalf("Apply() failed = %+v, want docs", result.Failed)
+	}
+	if claude.def.Name != "previous" {
+		t.Fatalf("claude definition = %+v, want rollback to previous", claude.def)
+	}
+	if result.Lock.MCPs[0].DefinitionHash != "old" {
+		t.Fatalf("lock hash = %q, want stale hash after failed render", result.Lock.MCPs[0].DefinitionHash)
+	}
+}
+
+func TestApplyReportsRollbackFailure(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	claude := &recordingAdapter{restoreErr: errRestoreFailed}
+	codex := &recordingAdapter{err: errRenderFailed}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "both"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx"}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: claude}, {Name: "codex", Adapter: codex}},
+	)
+	if len(result.Failed) != 1 || result.Failed[0] != "docs" {
+		t.Fatalf("Apply() failed = %+v, want docs", result.Failed)
+	}
+	if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "rollback: restore failed") {
+		t.Fatalf("Apply() errors = %+v, want rollback failure detail", result.Errors)
+	}
+}
+
 type fakeClient struct {
 	def  model.Definition
 	hash string
@@ -95,13 +157,30 @@ func (c fakeClient) Reindex(config.Library) (model.LibraryIndex, error) {
 }
 
 type recordingAdapter struct {
-	rendered bool
-	def      model.Definition
+	rendered   bool
+	def        model.Definition
+	err        error
+	restoreErr error
 }
 
 func (a *recordingAdapter) Render(def model.Definition) error {
+	if a.err != nil {
+		return a.err
+	}
 	a.rendered = true
 	a.def = def
+	return nil
+}
+
+func (a *recordingAdapter) Snapshot() (any, error) {
+	return a.def, nil
+}
+
+func (a *recordingAdapter) Restore(snapshot any) error {
+	if a.restoreErr != nil {
+		return a.restoreErr
+	}
+	a.def = snapshot.(model.Definition)
 	return nil
 }
 
@@ -112,6 +191,9 @@ func (a *recordingAdapter) Remove(string) error {
 func (a *recordingAdapter) TargetFile() string {
 	return ""
 }
+
+var errRenderFailed = errors.New("render failed")
+var errRestoreFailed = errors.New("restore failed")
 
 func testLibrary(t *testing.T) config.Library {
 	t.Helper()

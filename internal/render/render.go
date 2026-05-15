@@ -49,6 +49,14 @@ func (a ClaudeAdapter) TargetFile() string {
 	return filepath.Join(a.root, ".mcp.json")
 }
 
+func (a ClaudeAdapter) Snapshot() (any, error) {
+	return snapshotFile(a.TargetFile())
+}
+
+func (a ClaudeAdapter) Restore(snapshot any) error {
+	return restoreFile(a.TargetFile(), snapshot)
+}
+
 func (a ClaudeAdapter) Render(mcp model.Definition) error {
 	doc, err := readClaude(a.TargetFile())
 	if err != nil {
@@ -118,6 +126,14 @@ func readClaude(path string) (claudeDoc, error) {
 
 func (a CodexAdapter) TargetFile() string {
 	return filepath.Join(a.root, ".codex", "config.toml")
+}
+
+func (a CodexAdapter) Snapshot() (any, error) {
+	return snapshotFile(a.TargetFile())
+}
+
+func (a CodexAdapter) Restore(snapshot any) error {
+	return restoreFile(a.TargetFile(), snapshot)
 }
 
 func (a CodexAdapter) Render(mcp model.Definition) error {
@@ -248,6 +264,39 @@ func writeCodex(path string, doc codexDoc) error {
 		return err
 	}
 	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
+}
+
+type fileSnapshot struct {
+	exists bool
+	data   []byte
+}
+
+func snapshotFile(path string) (fileSnapshot, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return fileSnapshot{}, nil
+	}
+	if err != nil {
+		return fileSnapshot{}, fmt.Errorf("snapshot target %q: %w", path, err)
+	}
+	return fileSnapshot{exists: true, data: append([]byte{}, data...)}, nil
+}
+
+func restoreFile(path string, snapshot any) error {
+	snap, ok := snapshot.(fileSnapshot)
+	if !ok {
+		return fmt.Errorf("unexpected snapshot type %T", snapshot)
+	}
+	if !snap.exists {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove restored target %q: %w", path, err)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create restored target dir: %w", err)
+	}
+	return fileutil.AtomicWriteFile(path, snap.data, 0o600)
 }
 
 // Targets constructs the Adapter list for the given target names ("claude", "codex").

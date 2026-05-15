@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/poconnor/graft/internal/claudecfg"
 	"github.com/poconnor/graft/internal/config"
 	"github.com/poconnor/graft/internal/fileutil"
@@ -70,7 +71,7 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 		newStatusCommand(opts),
 		newSyncCommand(ctx, opts),
 		newInstallHooksCommand(opts),
-		newPickCommand(opts),
+		newPickCommand(ctx, opts),
 	)
 	return root
 }
@@ -685,12 +686,30 @@ func newInstallHooksCommand(opts *appOptions) *cobra.Command {
 	return cmd
 }
 
-func newPickCommand(opts *appOptions) *cobra.Command {
-	return &cobra.Command{
+type pickRunner func(context.Context, tui.PickModel) (tui.PickModel, error)
+
+func newPickCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+	return newPickCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
+}
+
+func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
+	var targets string
+	cmd := &cobra.Command{
 		Use:   "pick",
 		Short: "Select MCPs from registered libraries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			target, err := normalizePickTarget(targets)
+			if err != nil {
+				return err
+			}
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			if len(cfg.Libraries) == 0 {
+				return fmt.Errorf("no libraries configured")
+			}
 			lk, err := (lock.FileStore{}).Load(opts.root)
 			if err != nil {
 				return err
@@ -698,9 +717,76 @@ func newPickCommand(opts *appOptions) *cobra.Command {
 			if len(lk.Libraries) == 0 {
 				return fmt.Errorf("run graft init with a library first")
 			}
-			return println(cmd, "interactive picker ready")
+			pickList, err := buildPickList(cfg, client)
+			if err != nil {
+				return err
+			}
+			for _, warning := range pickList.Warnings {
+				if err := eprintf(cmd, "warning: %s\n", warning); err != nil {
+					return err
+				}
+			}
+			preSelected := []string{}
+			for _, mcp := range lk.MCPs {
+				preSelected = append(preSelected, mcp.Library+"/"+mcp.Name)
+			}
+			model, err := runner(ctx, tui.NewPickModel(pickList.Items, preSelected))
+			if err != nil {
+				return err
+			}
+			if !model.Confirmed {
+				return nil
+			}
+			next, err := applyPickResult(lk, model.Results(), target)
+			if err != nil {
+				return err
+			}
+			return (lock.FileStore{}).Save(opts.root, next)
 		},
 	}
+	cmd.Flags().StringVar(&targets, "targets", "both", "claude, codex, or both")
+	return cmd
+}
+
+// NewPickCommandForTest exposes the dependency-injected pick command to black-box
+// BDD tests in the features package.
+func NewPickCommandForTest(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error)) *cobra.Command {
+	return newPickCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
+}
+
+func runBubbleteaPick(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
+	final, err := tea.NewProgram(model, tea.WithContext(ctx)).Run()
+	if err != nil {
+		return tui.PickModel{}, err
+	}
+	picker, ok := final.(tui.PickModel)
+	if !ok {
+		return tui.PickModel{}, fmt.Errorf("picker returned unexpected model %T", final)
+	}
+	return picker, nil
+}
+
+func normalizePickTarget(raw string) (string, error) {
+	targets := parseTargets(raw)
+	if len(targets) == 0 {
+		return "", fmt.Errorf("target is required")
+	}
+	seen := map[string]bool{}
+	for _, target := range targets {
+		switch target {
+		case "claude", "codex":
+			seen[target] = true
+		default:
+			return "", fmt.Errorf("unknown target %q", target)
+		}
+	}
+	if seen["claude"] && seen["codex"] {
+		return "both", nil
+	}
+	if seen["claude"] {
+		return "claude", nil
+	}
+	return "codex", nil
 }
 
 type pickListResult struct {

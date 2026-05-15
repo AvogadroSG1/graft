@@ -21,6 +21,7 @@ type Result struct {
 	Succeeded []string
 	Failed    []string
 	Skipped   []string
+	Errors    []string
 	Lock      lock.Lock `json:"-"`
 }
 
@@ -32,6 +33,7 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 		Succeeded: []string{},
 		Failed:    []string{},
 		Skipped:   []string{},
+		Errors:    []string{},
 		Lock:      lk,
 	}
 	seen := map[string]bool{}
@@ -81,8 +83,9 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 			}
 			def.Args = handler.Inject(def.Pin, def.Args)
 		}
-		if !renderTarget(mcp.Target, def, adapters) {
+		if err := renderTarget(mcp.Target, def, adapters); err != nil {
 			result.Failed = append(result.Failed, mcp.Name)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", mcp.Name, err))
 			continue
 		}
 		result.Succeeded = append(result.Succeeded, mcp.Name)
@@ -146,12 +149,73 @@ func AuthWarning(command string, env map[string]string) string {
 	return ""
 }
 
-func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) bool {
+func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) error {
+	targets := renderTargetNames(target)
+	targeted := []render.AdapterByName{}
 	for _, adapter := range adapters {
-		if adapter.Name != target {
+		if !targets[adapter.Name] {
 			continue
 		}
-		return adapter.Adapter.Render(def) == nil
+		targeted = append(targeted, adapter)
 	}
-	return false
+	if len(targeted) == 0 {
+		return fmt.Errorf("no render adapter for target %q", target)
+	}
+	snapshots := []adapterSnapshot{}
+	if len(targeted) > 1 {
+		for _, adapter := range targeted {
+			restorable, ok := adapter.Adapter.(restorableAdapter)
+			if !ok {
+				return fmt.Errorf("adapter %q does not support rollback", adapter.Name)
+			}
+			snapshot, err := restorable.Snapshot()
+			if err != nil {
+				return fmt.Errorf("snapshot %s target: %w", adapter.Name, err)
+			}
+			snapshots = append(snapshots, adapterSnapshot{adapter: restorable, snapshot: snapshot})
+		}
+	}
+	for _, adapter := range targeted {
+		if err := adapter.Adapter.Render(def); err != nil {
+			if rollbackErr := restoreSnapshots(snapshots); rollbackErr != nil {
+				return fmt.Errorf("render %s target: %w; rollback: %w", adapter.Name, err, rollbackErr)
+			}
+			return fmt.Errorf("render %s target: %w", adapter.Name, err)
+		}
+	}
+	return nil
+}
+
+type restorableAdapter interface {
+	Snapshot() (any, error)
+	Restore(any) error
+}
+
+type adapterSnapshot struct {
+	adapter  restorableAdapter
+	snapshot any
+}
+
+func restoreSnapshots(snapshots []adapterSnapshot) error {
+	var errs []error
+	for idx := len(snapshots) - 1; idx >= 0; idx-- {
+		if err := snapshots[idx].adapter.Restore(snapshots[idx].snapshot); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func renderTargetNames(target string) map[string]bool {
+	if target == "both" {
+		return map[string]bool{"claude": true, "codex": true}
+	}
+	names := map[string]bool{}
+	for _, part := range strings.Split(target, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			names[part] = true
+		}
+	}
+	return names
 }
