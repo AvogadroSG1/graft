@@ -9,12 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/poconnor/graft/internal/config"
 	"github.com/poconnor/graft/internal/library"
 	librarymock "github.com/poconnor/graft/internal/library/mock"
 	"github.com/poconnor/graft/internal/lock"
 	"github.com/poconnor/graft/internal/model"
 	statuspkg "github.com/poconnor/graft/internal/status"
+	"github.com/poconnor/graft/internal/tui"
 	"go.uber.org/mock/gomock"
 )
 
@@ -36,6 +38,173 @@ func TestInitCommandCreatesLockAndTargets(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "initialized graft") {
 		t.Fatalf("output = %q, want initialization message", out.String())
+	}
+}
+
+func TestInitCommandLaunchesPickForSelectedLibrary(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", Default: true}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1", SHA256: "hash-docs"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Version: "1", Command: "npx"}, "hash-docs", nil)
+	runner := func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
+		if len(model.Items) != 1 || model.Items[0].Library != "core" {
+			t.Fatalf("pick items = %+v, want core/docs", model.Items)
+		}
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+		model = next.(tui.PickModel)
+		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(tui.PickModel), nil
+	}
+	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	initCmd.SetArgs([]string{"--targets", "codex", "--yes"})
+
+	if err := initCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	lk, err := (lock.FileStore{}).Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lk.Libraries) != 1 || lk.Libraries[0].Name != "core" || len(lk.MCPs) != 1 || lk.MCPs[0].Name != "docs" || lk.MCPs[0].Target != "codex" {
+		t.Fatalf("lock = %+v, want init-selected library and picked docs", lk)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, ".codex", "config.toml")); err != nil || !strings.Contains(string(data), "docs") {
+		t.Fatalf("codex config = %q, %v; want picked docs rendered", data, err)
+	}
+}
+
+func TestInitCommandStagesCreatedTargetFilesInGit(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	runGit(t, root, "init")
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	cmd := NewRootCommand(context.Background())
+	cmd.SetArgs([]string{"--config", cfg, "--root", root, "init", "--targets", "both", "--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	staged := string(runGitOutput(t, root, "diff", "--cached", "--name-only"))
+	for _, want := range []string{"graft.lock", ".mcp.json", ".codex/config.toml"} {
+		if !strings.Contains(staged, want) {
+			t.Fatalf("staged files = %q, want %s", staged, want)
+		}
+	}
+}
+
+func TestInitCommandStagesPostPickLock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	runGit(t, root, "init")
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", Default: true}
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := (config.FileStore{}).Save(cfgPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		t.Fatal(err)
+	}
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1", SHA256: "hash-docs"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Version: "1", Command: "npx"}, "hash-docs", nil)
+	runner := func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+		model = next.(tui.PickModel)
+		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(tui.PickModel), nil
+	}
+	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	initCmd.SetArgs([]string{"--targets", "claude", "--yes"})
+
+	if err := initCmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	stagedLock := string(runGitOutput(t, root, "show", ":graft.lock"))
+	if !strings.Contains(stagedLock, "docs") || !strings.Contains(stagedLock, "hash-docs") {
+		t.Fatalf("staged graft.lock = %s, want post-pick selection", stagedLock)
+	}
+}
+
+func TestInitCommandDoesNotStageExistingTargets(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	runGit(t, root, "init")
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("custom claude"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex", "config.toml"), []byte("custom codex"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewRootCommand(context.Background())
+	cmd.SetArgs([]string{"--config", filepath.Join(t.TempDir(), "config.json"), "--root", root, "init", "--targets", "both", "--yes"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	staged := string(runGitOutput(t, root, "diff", "--cached", "--name-only"))
+	if strings.Contains(staged, ".mcp.json") || strings.Contains(staged, ".codex/config.toml") {
+		t.Fatalf("staged files = %q, want existing targets not staged", staged)
+	}
+	if !strings.Contains(staged, "graft.lock") {
+		t.Fatalf("staged files = %q, want graft.lock staged", staged)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestInitCommandDoesNotOverwriteExistingTargets(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("custom claude"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".codex"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".codex", "config.toml"), []byte("custom codex"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewRootCommand(context.Background())
+	cmd.SetArgs([]string{"--config", filepath.Join(t.TempDir(), "config.json"), "--root", root, "init", "--targets", "both", "--yes"})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := string(mustReadFile(t, filepath.Join(root, ".mcp.json"))); got != "custom claude" {
+		t.Fatalf(".mcp.json = %q, want existing content preserved", got)
+	}
+	if got := string(mustReadFile(t, filepath.Join(root, ".codex", "config.toml"))); got != "custom codex" {
+		t.Fatalf("config.toml = %q, want existing content preserved", got)
+	}
+}
+
+func TestInitCommandRequiresYesToReinitializeExistingLock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := (lock.FileStore{}).Save(root, lock.Lock{Libraries: []lock.LibraryRef{}, MCPs: []lock.InstalledMCP{}}); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewRootCommand(context.Background())
+	cmd.SetArgs([]string{"--config", filepath.Join(t.TempDir(), "config.json"), "--root", root, "init"})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "graft.lock exists") {
+		t.Fatalf("Execute() error = %v, want existing lock refusal", err)
 	}
 }
 

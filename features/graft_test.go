@@ -107,12 +107,21 @@ func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
 func (s *featureState) registeredDefaultLibrary() error {
 	s.root, _ = os.MkdirTemp("", "graft-feature-root-*")
 	s.configPath = filepath.Join(s.root, "config.json")
-	return os.WriteFile(s.configPath, []byte(`{"libraries":[{"name":"core","url":"https://example.com/core.git","cache_path":"/tmp/core","default":true}]}`), 0o600)
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
+	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		return err
+	}
+	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{}}}
+	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+		return next.(tui.PickModel), nil
+	}
+	return nil
 }
 
 func (s *featureState) runInitBothTargets() error {
-	command := cmd.NewRootCommand(context.Background())
-	command.SetArgs([]string{"--config", s.configPath, "--root", s.root, "init", "--targets", "both", "--yes"})
+	command := cmd.NewInitCommandForTest(context.Background(), s.configPath, s.root, s.pickClient, s.pickRunner)
+	command.SetArgs([]string{"--targets", "both", "--yes"})
 	command.SetOut(&s.output)
 	s.err = command.Execute()
 	return s.err

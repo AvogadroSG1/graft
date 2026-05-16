@@ -68,7 +68,7 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.configPath, "config", "", "config file path")
 	root.PersistentFlags().StringVar(&opts.root, "root", ".", "project root")
 	root.AddCommand(
-		newInitCommand(opts),
+		newInitCommand(ctx, opts),
 		newLibraryCommand(ctx, opts),
 		newMCPCommand(ctx, opts),
 		newStatusCommand(opts),
@@ -79,7 +79,11 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	return root
 }
 
-func newInitCommand(opts *appOptions) *cobra.Command {
+func newInitCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+	return newInitCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
+}
+
+func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
 	var libraryName string
 	var targets string
 	var yes bool
@@ -89,12 +93,18 @@ func newInitCommand(opts *appOptions) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store := lock.FileStore{}
-			existing, err := store.Load(opts.root)
-			if err != nil {
-				return err
+			lockPath := filepath.Join(opts.root, "graft.lock")
+			lockExists := false
+			if _, statErr := os.Stat(lockPath); statErr == nil {
+				lockExists = true
+			} else if !os.IsNotExist(statErr) {
+				return fmt.Errorf("stat graft.lock: %w", statErr)
 			}
-			if len(existing.Libraries) > 0 && !yes {
+			if lockExists && !yes {
 				return fmt.Errorf("graft.lock exists; pass --yes to reinitialize")
+			}
+			if _, err := store.Load(opts.root); err != nil {
+				return err
 			}
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
@@ -113,12 +123,31 @@ func newInitCommand(opts *appOptions) *cobra.Command {
 				}
 				lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
 			}
-			for _, target := range parseTargets(targets) {
-				if err := createTarget(opts.root, target); err != nil {
+			targetNames := parseTargets(targets)
+			stagePaths := []string{"graft.lock"}
+			for _, target := range targetNames {
+				path, created, err := createTarget(opts.root, target)
+				if err != nil {
 					return err
+				}
+				if created {
+					stagePaths = append(stagePaths, path)
 				}
 			}
 			if err := store.Save(opts.root, lk); err != nil {
+				return err
+			}
+			if len(lk.Libraries) > 0 {
+				pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
+				pickCmd.SetArgs([]string{"--targets", targets})
+				pickCmd.SetIn(cmd.InOrStdin())
+				pickCmd.SetOut(cmd.OutOrStdout())
+				pickCmd.SetErr(cmd.ErrOrStderr())
+				if err := pickCmd.Execute(); err != nil {
+					return err
+				}
+			}
+			if err := stageInitFiles(opts.root, stagePaths); err != nil {
 				return err
 			}
 			return printf(cmd, "initialized graft at %s\n", opts.root)
@@ -1352,6 +1381,12 @@ func NewPickCommandForTest(ctx context.Context, configPath, root string, client 
 	return newPickCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
 }
 
+// NewInitCommandForTest exposes the dependency-injected init command to BDD
+// tests that need to avoid a real terminal picker or git-backed library cache.
+func NewInitCommandForTest(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error)) *cobra.Command {
+	return newInitCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
+}
+
 func runBubbleteaPick(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 	final, err := tea.NewProgram(model, tea.WithContext(ctx)).Run()
 	if err != nil {
@@ -1645,25 +1680,42 @@ func parseTargets(raw string) []string {
 	}
 }
 
-func createTarget(root, target string) error {
+func stageInitFiles(root string, paths []string) error {
+	if _, statErr := os.Stat(filepath.Join(root, ".git")); os.IsNotExist(statErr) {
+		return nil
+	} else if statErr != nil {
+		return fmt.Errorf("stat git directory: %w", statErr)
+	}
+	args := append([]string{"-C", root, "add", "--"}, paths...)
+	if err := exec.Command("git", args...).Run(); err != nil {
+		return fmt.Errorf("stage init files: %w", err)
+	}
+	return nil
+}
+
+func createTarget(root, target string) (string, bool, error) {
 	switch target {
 	case "claude":
 		path := filepath.Join(root, ".mcp.json")
 		if _, err := os.Stat(path); err == nil {
-			return nil
+			return ".mcp.json", false, nil
+		} else if !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("stat claude target: %w", err)
 		}
-		return fileutil.AtomicWriteFile(path, []byte("{\n  \"mcpServers\": {}\n}\n"), 0o600)
+		return ".mcp.json", true, fileutil.AtomicWriteFile(path, []byte("{\n  \"mcpServers\": {}\n}\n"), 0o600)
 	case "codex":
 		path := filepath.Join(root, ".codex", "config.toml")
 		if _, err := os.Stat(path); err == nil {
-			return nil
+			return ".codex/config.toml", false, nil
+		} else if !os.IsNotExist(err) {
+			return "", false, fmt.Errorf("stat codex target: %w", err)
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
+			return "", false, err
 		}
-		return fileutil.AtomicWriteFile(path, []byte("[mcp_servers]\n"), 0o600)
+		return ".codex/config.toml", true, fileutil.AtomicWriteFile(path, []byte("[mcp_servers]\n"), 0o600)
 	default:
-		return fmt.Errorf("unknown target %q", target)
+		return "", false, fmt.Errorf("unknown target %q", target)
 	}
 }
 
