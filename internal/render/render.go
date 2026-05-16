@@ -75,7 +75,7 @@ func (a ClaudeAdapter) Render(mcp model.Definition) error {
 		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
-	return writeJSON(a.TargetFile(), doc)
+	return writeClaude(a.TargetFile(), doc)
 }
 
 func (a ClaudeAdapter) Remove(name string) error {
@@ -86,11 +86,12 @@ func (a ClaudeAdapter) Remove(name string) error {
 	if existing, ok := doc.MCPServers[name]; ok && existing.Managed {
 		delete(doc.MCPServers, name)
 	}
-	return writeJSON(a.TargetFile(), doc)
+	return writeClaude(a.TargetFile(), doc)
 }
 
 type claudeDoc struct {
 	MCPServers map[string]claudeServer `json:"mcpServers"`
+	raw        map[string]any
 }
 
 type claudeServer struct {
@@ -104,7 +105,7 @@ type claudeServer struct {
 }
 
 func readClaude(path string) (claudeDoc, error) {
-	doc := claudeDoc{MCPServers: map[string]claudeServer{}}
+	doc := claudeDoc{MCPServers: map[string]claudeServer{}, raw: map[string]any{}}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return doc, nil
@@ -116,6 +117,9 @@ func readClaude(path string) (claudeDoc, error) {
 		return doc, nil
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
+		return doc, fmt.Errorf("parse claude config %q: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &doc.raw); err != nil {
 		return doc, fmt.Errorf("parse claude config %q: %w", path, err)
 	}
 	if doc.MCPServers == nil {
@@ -151,6 +155,7 @@ func (a CodexAdapter) Render(mcp model.Definition) error {
 		Args:    stdioArgs(cfg),
 		Env:     stdioEnv(cfg),
 		URL:     remoteURL(cfg),
+		Headers: remoteHeaders(cfg),
 		Managed: true,
 	}
 	return writeCodex(a.TargetFile(), doc)
@@ -178,6 +183,7 @@ type codexServer struct {
 	Env     map[string]string `toml:"env,omitempty"`
 	Type    string            `toml:"type,omitempty"`
 	URL     string            `toml:"url,omitempty"`
+	Headers map[string]string `toml:"headers,omitempty"`
 	Managed bool              `toml:"_graft_managed,omitempty"`
 }
 
@@ -240,15 +246,71 @@ func readCodex(path string) (codexDoc, error) {
 	return doc, nil
 }
 
-func writeJSON(path string, value any) error {
+func writeClaude(path string, doc claudeDoc) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create target dir: %w", err)
 	}
-	data, err := json.MarshalIndent(value, "", "  ")
+	if doc.raw == nil {
+		doc.raw = map[string]any{}
+	}
+	rawServers, _ := doc.raw["mcpServers"].(map[string]any)
+	if rawServers == nil {
+		rawServers = map[string]any{}
+	}
+	for name, rawServer := range rawServers {
+		if _, ok := doc.MCPServers[name]; ok {
+			continue
+		}
+		if rawManaged(rawServer) {
+			delete(rawServers, name)
+		}
+	}
+	for name, server := range doc.MCPServers {
+		if server.Managed {
+			rawServers[name] = claudeServerFields(server)
+		}
+	}
+	doc.raw["mcpServers"] = rawServers
+	data, err := json.MarshalIndent(doc.raw, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal json target: %w", err)
 	}
 	return fileutil.AtomicWriteFile(path, append(data, '\n'), 0o600)
+}
+
+func rawManaged(value any) bool {
+	server, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	managed, _ := server["_graft_managed"].(bool)
+	return managed
+}
+
+func claudeServerFields(server claudeServer) map[string]any {
+	fields := map[string]any{}
+	if server.Type != "" {
+		fields["type"] = server.Type
+	}
+	if server.Command != "" {
+		fields["command"] = server.Command
+	}
+	if len(server.Args) > 0 {
+		fields["args"] = server.Args
+	}
+	if len(server.Env) > 0 {
+		fields["env"] = server.Env
+	}
+	if server.URL != "" {
+		fields["url"] = server.URL
+	}
+	if len(server.Headers) > 0 {
+		fields["headers"] = server.Headers
+	}
+	if server.Managed {
+		fields["_graft_managed"] = true
+	}
+	return fields
 }
 
 func writeCodex(path string, doc codexDoc) error {
@@ -258,12 +320,64 @@ func writeCodex(path string, doc codexDoc) error {
 	if doc.raw == nil {
 		doc.raw = map[string]any{}
 	}
-	doc.raw["mcp_servers"] = doc.MCPServers
+	rawServers, _ := doc.raw["mcp_servers"].(map[string]any)
+	if rawServers == nil {
+		rawServers = map[string]any{}
+	}
+	for name, rawServer := range rawServers {
+		if _, ok := doc.MCPServers[name]; ok {
+			continue
+		}
+		if rawCodexServerManaged(rawServer) {
+			delete(rawServers, name)
+		}
+	}
+	for name, server := range doc.MCPServers {
+		if server.Managed {
+			rawServers[name] = codexServerFields(server)
+		}
+	}
+	doc.raw["mcp_servers"] = rawServers
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(doc.raw); err != nil {
 		return err
 	}
 	return fileutil.AtomicWriteFile(path, buf.Bytes(), 0o600)
+}
+
+func rawCodexServerManaged(value any) bool {
+	server, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	managed, _ := server["_graft_managed"].(bool)
+	return managed
+}
+
+func codexServerFields(server codexServer) map[string]any {
+	fields := map[string]any{}
+	if server.Command != "" {
+		fields["command"] = server.Command
+	}
+	if len(server.Args) > 0 {
+		fields["args"] = server.Args
+	}
+	if len(server.Env) > 0 {
+		fields["env"] = server.Env
+	}
+	if server.Type != "" {
+		fields["type"] = server.Type
+	}
+	if server.URL != "" {
+		fields["url"] = server.URL
+	}
+	if len(server.Headers) > 0 {
+		fields["headers"] = server.Headers
+	}
+	if server.Managed {
+		fields["_graft_managed"] = true
+	}
+	return fields
 }
 
 type fileSnapshot struct {
