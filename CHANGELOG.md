@@ -9,12 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Hardened `graft library add/list/pull/show` workflows with command-level tests and executable Godog scenarios for registering, listing, pulling, browsing, and unknown-library bootstrap.
+- `graft library list` now reports last-pulled timestamps and redacts credential-bearing URLs when displaying existing config entries.
+- `graft library show <name> <mcp>` now renders the full definition schema, including adapter blocks, as JSON.
 - `graft library migrate-from-claude <name>` command to create a local git-backed library from Claude MCP configuration with dry-run, force recreation, scoped prompts, duplicate handling, and env/header placeholder redaction.
 - SSE and HTTP MCP transport fields across definitions, imports, Claude/Codex render adapters, and Claude-config migration.
 - Versioned definition schema migrations with chained resolver support, automatic `rename` and `set_default` steps, `require_input` pending handling, and `pending_input` status reporting during `graft sync`.
 
 ### Changed
 
+- `graft library add` now rejects duplicate library names, unsafe names, non-HTTPS URLs, local path remotes, scp-like SSH syntax, and URLs with embedded credentials before cloning or persisting config.
+- `graft library pull [name]` now persists `last_pulled_at` after each successful pull before reporting the SHA, preserving metadata for earlier successes if a later pull fails.
 - Codex rendering preserves unrelated existing TOML settings while updating managed MCP entries.
 - Existing config imports redact literal env and header values into placeholders before writing library definitions.
 
