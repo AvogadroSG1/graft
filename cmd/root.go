@@ -1314,9 +1314,7 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if len(cfg.Libraries) == 0 {
 				return fmt.Errorf("no libraries configured")
 			}
-			if len(lk.Libraries) == 0 {
-				return fmt.Errorf("run graft init with a library first")
-			}
+			lk = lockWithConfiguredLibraries(lk, cfg)
 			pickList, err := buildPickList(cfg, client)
 			if err != nil {
 				return err
@@ -1341,7 +1339,7 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			return (lock.FileStore{}).Save(opts.root, next)
+			return savePickResultWithSideEffects(opts.root, cfg, client, lk, next)
 		},
 	}
 	cmd.Flags().StringVar(&targets, "targets", "both", "claude, codex, or both")
@@ -1364,6 +1362,176 @@ func runBubbleteaPick(ctx context.Context, model tui.PickModel) (tui.PickModel, 
 		return tui.PickModel{}, fmt.Errorf("picker returned unexpected model %T", final)
 	}
 	return picker, nil
+}
+
+func lockWithConfiguredLibraries(lk lock.Lock, cfg config.Config) lock.Lock {
+	next := lk
+	seen := map[string]bool{}
+	for _, lib := range next.Libraries {
+		seen[lib.Name] = true
+	}
+	for _, lib := range cfg.Libraries {
+		if seen[lib.Name] {
+			continue
+		}
+		next.Libraries = append(next.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
+		seen[lib.Name] = true
+	}
+	return next
+}
+
+func savePickResultWithSideEffects(root string, cfg config.Config, client library.Client, old lock.Lock, next lock.Lock) error {
+	adapters := []render.AdapterByName{
+		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
+		{Name: "codex", Adapter: render.NewCodexAdapter(root)},
+	}
+	snapshots, err := snapshotPickAdapters(adapters)
+	if err != nil {
+		return err
+	}
+	oldMCPs := map[string]lock.InstalledMCP{}
+	for _, mcp := range old.MCPs {
+		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	nextMCPs := map[string]lock.InstalledMCP{}
+	for _, mcp := range next.MCPs {
+		nextMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	for key, oldMCP := range oldMCPs {
+		nextMCP, ok := nextMCPs[key]
+		if !ok || oldMCP.Target != nextMCP.Target || oldMCP.DefinitionHash != nextMCP.DefinitionHash {
+			if err := removePickTargets(adapters, oldMCP); err != nil {
+				return rollbackPickSideEffects(snapshots, err)
+			}
+		}
+	}
+	resultLock := next
+	if syncNames := pickSyncNames(old, next); len(syncNames) > 0 {
+		result := graftsync.ApplyWithOptions(preparePickSyncLock(old, next), cfg, client, adapters, graftsync.Options{Names: syncNames})
+		if err := pickSyncError(result); err != nil {
+			return rollbackPickSideEffects(snapshots, err)
+		}
+		resultLock = result.Lock
+	}
+	if err := (lock.FileStore{}).Save(root, resultLock); err != nil {
+		return rollbackPickSideEffects(snapshots, err)
+	}
+	return nil
+}
+
+func pickSyncNames(old lock.Lock, next lock.Lock) []string {
+	oldMCPs := map[string]lock.InstalledMCP{}
+	for _, mcp := range old.MCPs {
+		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	names := []string{}
+	for _, mcp := range next.MCPs {
+		oldMCP, ok := oldMCPs[pickLockKey(mcp.Library, mcp.Name)]
+		if !ok || oldMCP.Target != mcp.Target || oldMCP.DefinitionHash != mcp.DefinitionHash {
+			names = append(names, mcp.Name)
+		}
+	}
+	return names
+}
+
+func preparePickSyncLock(old lock.Lock, next lock.Lock) lock.Lock {
+	oldMCPs := map[string]lock.InstalledMCP{}
+	for _, mcp := range old.MCPs {
+		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	prepared := next
+	for idx, mcp := range prepared.MCPs {
+		oldMCP, ok := oldMCPs[pickLockKey(mcp.Library, mcp.Name)]
+		if !ok {
+			prepared.MCPs[idx].Version = ""
+			prepared.MCPs[idx].DefinitionHash = ""
+			continue
+		}
+		prepared.MCPs[idx].Version = oldMCP.Version
+		prepared.MCPs[idx].DefinitionHash = oldMCP.DefinitionHash
+		if oldMCP.Target != mcp.Target || oldMCP.DefinitionHash != mcp.DefinitionHash {
+			prepared.MCPs[idx].DefinitionHash = ""
+		}
+	}
+	return prepared
+}
+
+func pickSyncError(result graftsync.Result) error {
+	if len(result.Errors) > 0 {
+		return errors.New(strings.Join(result.Errors, "; "))
+	}
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "auth warning") {
+			return errors.New(warning)
+		}
+	}
+	return nil
+}
+
+func snapshotPickAdapters(adapters []render.AdapterByName) ([]pickAdapterSnapshot, error) {
+	snapshots := []pickAdapterSnapshot{}
+	for _, adapter := range adapters {
+		restorable, ok := adapter.Adapter.(pickRestorableAdapter)
+		if !ok {
+			return nil, fmt.Errorf("adapter %q does not support rollback", adapter.Name)
+		}
+		snapshot, err := restorable.Snapshot()
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s target: %w", adapter.Name, err)
+		}
+		snapshots = append(snapshots, pickAdapterSnapshot{name: adapter.Name, adapter: restorable, snapshot: snapshot})
+	}
+	return snapshots, nil
+}
+
+func rollbackPickSideEffects(snapshots []pickAdapterSnapshot, cause error) error {
+	var rollbackErrs []error
+	for idx := len(snapshots) - 1; idx >= 0; idx-- {
+		if err := snapshots[idx].adapter.Restore(snapshots[idx].snapshot); err != nil {
+			rollbackErrs = append(rollbackErrs, fmt.Errorf("restore %s target: %w", snapshots[idx].name, err))
+		}
+	}
+	if rollbackErr := errors.Join(rollbackErrs...); rollbackErr != nil {
+		return fmt.Errorf("pick side effects: %w; rollback: %w", cause, rollbackErr)
+	}
+	return cause
+}
+
+type pickRestorableAdapter interface {
+	Snapshot() (any, error)
+	Restore(any) error
+}
+
+type pickAdapterSnapshot struct {
+	name     string
+	adapter  pickRestorableAdapter
+	snapshot any
+}
+
+func pickLockKey(libraryName, mcpName string) string {
+	return libraryName + "/" + mcpName
+}
+
+func removePickTargets(adapters []render.AdapterByName, mcp lock.InstalledMCP) error {
+	for _, target := range parseTargets(mcp.Target) {
+		adapter, ok := pickAdapter(adapters, target)
+		if !ok {
+			return fmt.Errorf("no render adapter for target %q", target)
+		}
+		if err := adapter.Remove(mcp.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pickAdapter(adapters []render.AdapterByName, name string) (render.Adapter, bool) {
+	for _, adapter := range adapters {
+		if adapter.Name == name {
+			return adapter.Adapter, true
+		}
+	}
+	return nil, false
 }
 
 func normalizePickTarget(raw string) (string, error) {
@@ -1420,6 +1588,10 @@ func applyPickResult(lk lock.Lock, results []tui.PickItem, target string) (lock.
 	for _, lib := range lk.Libraries {
 		libraries[lib.Name] = true
 	}
+	oldMCPs := map[string]lock.InstalledMCP{}
+	for _, mcp := range lk.MCPs {
+		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
 	seenNames := map[string]bool{}
 	next := lk
 	next.MCPs = []lock.InstalledMCP{}
@@ -1431,13 +1603,17 @@ func applyPickResult(lk lock.Lock, results []tui.PickItem, target string) (lock.
 			return lk, fmt.Errorf("duplicate MCP name %q selected; rendered targets are keyed by name", result.Entry.Name)
 		}
 		seenNames[result.Entry.Name] = true
-		next.MCPs = append(next.MCPs, lock.InstalledMCP{
+		selected := lock.InstalledMCP{
 			Name:           result.Entry.Name,
 			Library:        result.Library,
 			Version:        result.Entry.Version,
 			DefinitionHash: result.Entry.SHA256,
 			Target:         target,
-		})
+		}
+		if oldMCP, ok := oldMCPs[pickLockKey(result.Library, result.Entry.Name)]; ok && oldMCP.Target == target && oldMCP.DefinitionHash == result.Entry.SHA256 {
+			selected = oldMCP
+		}
+		next.MCPs = append(next.MCPs, selected)
 	}
 	return next, nil
 }

@@ -145,7 +145,7 @@ func (s *featureState) libraryIndex() error {
 	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", Description: "Documentation server", SHA256: "hash-docs"}}}}
+	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", Description: "Documentation server", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 		if len(model.Items) != 1 || model.Items[0].Library != "core" || model.Items[0].Entry.Name != "docs" {
 			return tui.PickModel{}, fmt.Errorf("picker items = %+v", model.Items)
@@ -178,7 +178,7 @@ func (s *featureState) lockHasSelectedMCPs() error {
 	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}}
+	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	return (lock.FileStore{}).Save(s.root, lock.Lock{
 		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
 		MCPs: []lock.InstalledMCP{{
@@ -220,7 +220,7 @@ func (s *featureState) confirmSelections() error {
 	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}}
+	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
 		model = next.(tui.PickModel)
@@ -255,6 +255,8 @@ func (s *featureState) noop() error {
 
 type featureLibraryClient struct {
 	index model.LibraryIndex
+	def   model.Definition
+	hash  string
 }
 
 func (c featureLibraryClient) Add(context.Context, config.Library) error { return nil }
@@ -264,7 +266,7 @@ func (c featureLibraryClient) Pull(context.Context, config.Library) (string, err
 func (c featureLibraryClient) Index(config.Library) (model.LibraryIndex, error) { return c.index, nil }
 
 func (c featureLibraryClient) Definition(config.Library, string) (model.Definition, string, error) {
-	return model.Definition{}, "", nil
+	return c.def, c.hash, nil
 }
 
 func (c featureLibraryClient) Reindex(config.Library) (model.LibraryIndex, error) {

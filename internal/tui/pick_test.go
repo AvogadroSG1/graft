@@ -112,3 +112,48 @@ func TestPickModelViewIncludesLibraryPrefix(t *testing.T) {
 		t.Fatalf("View() = %q, want library-prefixed description", got)
 	}
 }
+
+func TestPickModelViewHonorsSingleLineHeight(t *testing.T) {
+	t.Parallel()
+	picker := NewPickModel([]PickItem{{Library: "core", Entry: model.IndexEntry{Name: "docs", Description: "Docs"}}}, nil)
+	next, _ := picker.Update(tea.WindowSizeMsg{Width: 80, Height: 1})
+	picker = next.(PickModel)
+
+	if got := len(strings.Split(picker.View(), "\n")); got != 1 {
+		t.Fatalf("view line count = %d, want title only at height 1", got)
+	}
+}
+
+func TestPickModelViewGroupsTagsAndScrolls(t *testing.T) {
+	items := []PickItem{
+		{Library: "core", Entry: model.IndexEntry{Name: "docs", Description: "Docs", Tags: []string{"docs", "search"}}},
+		{Library: "core", Entry: model.IndexEntry{Name: "build", Description: "Build", Tags: []string{"ci"}}},
+		{Library: "team", Entry: model.IndexEntry{Name: "deploy", Description: "Deploy", Tags: []string{"ops"}}},
+	}
+	model := NewPickModel(items, nil)
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 4})
+	model = next.(PickModel)
+	view := model.View()
+	for _, want := range []string{"core", "[docs,search]", "Docs"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view = %q, want %q", view, want)
+		}
+	}
+	if got := len(strings.Split(view, "\n")); got > 4 {
+		t.Fatalf("view line count = %d, want at most terminal height", got)
+	}
+	if strings.Contains(view, "deploy") {
+		t.Fatalf("view = %q, want long list clipped before deploy", view)
+	}
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(PickModel)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = next.(PickModel)
+	view = model.View()
+	if !strings.Contains(view, "team") || !strings.Contains(view, "deploy") {
+		t.Fatalf("view = %q, want scrolled team/deploy row", view)
+	}
+	if got := len(strings.Split(view, "\n")); got > 4 {
+		t.Fatalf("scrolled view line count = %d, want at most terminal height", got)
+	}
+}

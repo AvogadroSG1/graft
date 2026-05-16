@@ -22,6 +22,9 @@ type PickModel struct {
 	Items     []PickItem
 	Selected  map[string]bool
 	Cursor    int
+	Offset    int
+	Width     int
+	Height    int
 	Done      bool
 	Confirmed bool
 }
@@ -41,6 +44,11 @@ func (m PickModel) Init() tea.Cmd {
 }
 
 func (m PickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if size, ok := msg.(tea.WindowSizeMsg); ok {
+		m.Width = size.Width
+		m.Height = size.Height
+		return m.withCursorVisible(), nil
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -54,10 +62,12 @@ func (m PickModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.Cursor > 0 {
 			m.Cursor--
 		}
+		m = m.withCursorVisible()
 	case "down", "j":
 		if m.Cursor < len(m.Items)-1 {
 			m.Cursor++
 		}
+		m = m.withCursorVisible()
 	case " ":
 		if len(m.Items) > 0 {
 			if m.Selected == nil {
@@ -91,7 +101,17 @@ func (m PickModel) Results() []PickItem {
 func (m PickModel) View() string {
 	title := lipgloss.NewStyle().Bold(true).Render("Select MCPs")
 	rows := []string{title}
-	for idx, item := range m.Items {
+	bodyLimit := m.bodyLineLimit()
+	bodyRows := 0
+	lastLibrary := ""
+	for idx := m.Offset; idx < len(m.Items); idx++ {
+		item := m.Items[idx]
+		if item.Library != lastLibrary {
+			if !appendWithinLimit(&rows, item.Library, bodyLimit, &bodyRows) {
+				break
+			}
+			lastLibrary = item.Library
+		}
 		cursor := " "
 		if idx == m.Cursor {
 			cursor = ">"
@@ -100,9 +120,75 @@ func (m PickModel) View() string {
 		if m.Selected[selectionKey(item)] {
 			check = "[x]"
 		}
-		rows = append(rows, fmt.Sprintf("%s %s %s %s: %s", cursor, check, item.Entry.Name, item.Library, item.Entry.Description))
+		tags := ""
+		if len(item.Entry.Tags) > 0 {
+			tags = " [" + strings.Join(item.Entry.Tags, ",") + "]"
+		}
+		if !appendWithinLimit(&rows, fmt.Sprintf("%s %s %s%s %s: %s", cursor, check, item.Entry.Name, tags, item.Library, item.Entry.Description), bodyLimit, &bodyRows) {
+			break
+		}
 	}
 	return strings.Join(rows, "\n")
+}
+
+func appendWithinLimit(rows *[]string, row string, limit int, count *int) bool {
+	if limit >= 0 && *count >= limit {
+		return false
+	}
+	*rows = append(*rows, row)
+	*count++
+	return true
+}
+
+func (m PickModel) bodyLineLimit() int {
+	if m.Height <= 0 {
+		return -1
+	}
+	limit := m.Height - 1
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+func (m PickModel) withCursorVisible() PickModel {
+	if m.Cursor < m.Offset {
+		m.Offset = m.Cursor
+	}
+	for m.Offset < m.Cursor && !m.cursorRendered() {
+		m.Offset++
+	}
+	if m.Offset < 0 {
+		m.Offset = 0
+	}
+	return m
+}
+
+func (m PickModel) cursorRendered() bool {
+	if m.Height <= 0 {
+		return true
+	}
+	bodyLimit := m.bodyLineLimit()
+	bodyRows := 0
+	lastLibrary := ""
+	for idx := m.Offset; idx < len(m.Items); idx++ {
+		item := m.Items[idx]
+		if item.Library != lastLibrary {
+			if bodyRows >= bodyLimit {
+				return false
+			}
+			bodyRows++
+			lastLibrary = item.Library
+		}
+		if bodyRows >= bodyLimit {
+			return false
+		}
+		if idx == m.Cursor {
+			return true
+		}
+		bodyRows++
+	}
+	return false
 }
 
 func selectionKey(item PickItem) string {
