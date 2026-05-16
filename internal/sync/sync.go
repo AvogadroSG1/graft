@@ -21,21 +21,50 @@ type Result struct {
 	Succeeded []string
 	Failed    []string
 	Skipped   []string
+	Warnings  []string
+	Errors    []string
 	Lock      lock.Lock `json:"-"`
+}
+
+// Options controls optional sync filtering behavior.
+type Options struct {
+	// Names limits sync processing to installed MCPs with matching names.
+	Names []string
+	// ForcePins allows a valid pin mismatch when a confirmation phrase is supplied.
+	ForcePins bool
+	// PinConfirmation is the pre-supplied phrase used when ConfirmPinMismatch is nil.
+	PinConfirmation string
+	// ConfirmPinMismatch prompts for confirmation after a concrete pin mismatch is known.
+	ConfirmPinMismatch func(diff string) (string, error)
 }
 
 // Apply iterates over the MCPs in the lock file, fetches each definition from the library,
 // enforces pins, and renders the result via the appropriate adapter. Each MCP ends up in
 // exactly one of Succeeded, Failed, or Skipped (already up-to-date or duplicate).
 func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []render.AdapterByName) Result {
+	return ApplyWithOptions(lk, cfg, client, adapters, Options{})
+}
+
+// ApplyWithOptions applies library updates like Apply, with optional filtering.
+func ApplyWithOptions(lk lock.Lock, cfg config.Config, client library.Client, adapters []render.AdapterByName, opts Options) Result {
 	result := Result{
 		Succeeded: []string{},
 		Failed:    []string{},
 		Skipped:   []string{},
+		Warnings:  []string{},
+		Errors:    []string{},
 		Lock:      lk,
+	}
+	names := map[string]bool{}
+	for _, name := range opts.Names {
+		names[name] = true
 	}
 	seen := map[string]bool{}
 	for idx, mcp := range lk.MCPs {
+		if len(names) > 0 && !names[mcp.Name] {
+			result.Skipped = append(result.Skipped, mcp.Name)
+			continue
+		}
 		key := mcp.Library + "/" + mcp.Name
 		if seen[key] {
 			result.Skipped = append(result.Skipped, mcp.Name)
@@ -45,10 +74,16 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 		lib, ok := cfg.Library(mcp.Library)
 		if !ok {
 			result.Failed = append(result.Failed, mcp.Name)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: library %q is not registered", mcp.Name, mcp.Library))
 			continue
 		}
 		def, hash, err := client.Definition(lib, mcp.Name)
-		if err != nil || hash == mcp.DefinitionHash {
+		if err != nil {
+			result.Failed = append(result.Failed, mcp.Name)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: definition: %v", mcp.Name, err))
+			continue
+		}
+		if hash == mcp.DefinitionHash {
 			result.Skipped = append(result.Skipped, mcp.Name)
 			continue
 		}
@@ -60,6 +95,7 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 				continue
 			}
 			result.Failed = append(result.Failed, mcp.Name)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: migration: %v", mcp.Name, err))
 			continue
 		}
 		def = migrated
@@ -68,21 +104,24 @@ func Apply(lk lock.Lock, cfg config.Config, client library.Client, adapters []re
 			result.Skipped = append(result.Skipped, mcp.Name)
 			continue
 		}
-		if def.Pin.Runtime != "" {
-			registry := pin.NewRegistry()
-			handler, ok := registry.Handler(def.Command)
-			if !ok {
-				result.Failed = append(result.Failed, mcp.Name)
-				continue
-			}
-			if err := pin.Enforce(handler, def.Pin, mcp.Version, false, ""); err != nil {
-				result.Failed = append(result.Failed, mcp.Name)
-				continue
-			}
-			def.Args = handler.Inject(def.Pin, def.Args)
+		if warning := AuthWarningForTarget(def, mcp.Target); warning != "" {
+			result.Warnings = append(result.Warnings, warning)
+			result.Skipped = append(result.Skipped, mcp.Name)
+			continue
 		}
-		if !renderTarget(mcp.Target, def, adapters) {
+		if def.Pin.Runtime != "" {
+			pinned, warnings, err := enforcePinForTargets(def, mcp.Target, opts)
+			if err != nil {
+				result.Failed = append(result.Failed, mcp.Name)
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: pin: %v", mcp.Name, err))
+				continue
+			}
+			result.Warnings = append(result.Warnings, warnings...)
+			def = pinned
+		}
+		if err := renderTarget(mcp.Target, def, adapters); err != nil {
 			result.Failed = append(result.Failed, mcp.Name)
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", mcp.Name, err))
 			continue
 		}
 		result.Succeeded = append(result.Succeeded, mcp.Name)
@@ -128,30 +167,173 @@ func migrateDefinition(lib config.Library, mcp lock.InstalledMCP, def model.Defi
 	return migrated, pending, nil
 }
 
-// AuthWarning returns a human-readable warning if any env key or value contains
-// credential-bearing patterns (TOKEN, SECRET, PASSWORD, CREDENTIAL, or a Bearer prefix).
-// Returns an empty string when the definition appears credential-free.
-func AuthWarning(command string, env map[string]string) string {
-	for key, value := range env {
-		upperKey := strings.ToUpper(key)
-		upperValue := strings.ToUpper(value)
-		if strings.Contains(upperKey, "TOKEN") ||
-			strings.Contains(upperKey, "SECRET") ||
-			strings.Contains(upperKey, "PASSWORD") ||
-			strings.Contains(upperKey, "CREDENTIAL") ||
-			strings.Contains(upperValue, "BEARER ") {
-			return fmt.Sprintf("auth warning: %s uses credential-bearing environment; default answer is no", command)
+// AuthWarning returns a human-readable warning if any environment or header key/value
+// contains credential-bearing patterns. Returns an empty string when the definition
+// appears credential-free.
+func AuthWarning(def model.Definition) string {
+	if credentialMapHasSensitiveFields(def.Env) || credentialMapHasSensitiveFields(def.Headers) {
+		return fmt.Sprintf("auth warning: %s uses credential-bearing fields; default answer is no", def.Command)
+	}
+	return ""
+}
+
+// AuthWarningForTarget returns a warning for target-specific credential-bearing fields.
+func AuthWarningForTarget(def model.Definition, target string) string {
+	if warning := AuthWarning(def); warning != "" {
+		return warning
+	}
+	for _, name := range renderTargetList(target) {
+		cfg := def.Adapter(name)
+		if credentialMapHasSensitiveFields(cfg.Env) || credentialMapHasSensitiveFields(cfg.Headers) {
+			return fmt.Sprintf("auth warning: %s uses credential-bearing fields for %s; default answer is no", cfg.Command, name)
 		}
 	}
 	return ""
 }
 
-func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) bool {
-	for _, adapter := range adapters {
-		if adapter.Name != target {
-			continue
+func credentialMapHasSensitiveFields(values map[string]string) bool {
+	for key, value := range values {
+		upperKey := strings.ToUpper(key)
+		upperValue := strings.ToUpper(value)
+		if strings.Contains(upperKey, "TOKEN") ||
+			strings.Contains(upperKey, "SECRET") ||
+			strings.Contains(upperKey, "KEY") ||
+			strings.Contains(upperKey, "PASSWORD") ||
+			strings.Contains(upperKey, "CREDENTIAL") ||
+			upperKey == "AUTHORIZATION" ||
+			upperKey == "BEARER_TOKEN_ENV_VAR" ||
+			strings.Contains(upperValue, "BEARER ") {
+			return true
 		}
-		return adapter.Adapter.Render(def) == nil
 	}
 	return false
+}
+
+func enforcePinForTargets(def model.Definition, target string, opts Options) (model.Definition, []string, error) {
+	registry := pin.NewRegistry()
+	handler, ok := registry.HandlerForRuntime(def.Pin.Runtime)
+	if !ok {
+		return def, []string{fmt.Sprintf("no pin handler for runtime %s; MCP will run unpinned", def.Pin.Runtime)}, nil
+	}
+	for idx, name := range renderTargetList(target) {
+		cfg := def.Adapter(name)
+		if !handler.Detect(cfg.Command) {
+			return def, nil, fmt.Errorf("runtime %s does not match command %q", def.Pin.Runtime, cfg.Command)
+		}
+		installedVersion := pin.InstalledRuntimeVersion(def.Pin.Runtime, cfg.Args)
+		if err := handler.Validate(def.Pin, installedVersion); err != nil {
+			confirmation := opts.PinConfirmation
+			if opts.ForcePins && !errors.Is(err, pin.ErrInvalidPin) && opts.ConfirmPinMismatch != nil {
+				var confirmErr error
+				confirmation, confirmErr = opts.ConfirmPinMismatch(pinMismatchDiff(installedVersion, def.Pin))
+				if confirmErr != nil {
+					return def, nil, confirmErr
+				}
+			}
+			if err := pin.Enforce(handler, def.Pin, installedVersion, opts.ForcePins, confirmation); err != nil {
+				return def, nil, err
+			}
+		}
+		injected := handler.Inject(def.Pin, cfg.Args)
+		if idx == 0 {
+			def.Args = append([]string{}, injected...)
+		}
+		if def.Adapters == nil {
+			def.Adapters = map[string]model.AdapterConfig{}
+		}
+		override := def.Adapters[name]
+		override.Args = append([]string{}, injected...)
+		def.Adapters[name] = override
+	}
+	return def, nil, nil
+}
+
+func pinMismatchDiff(installedVersion string, pin model.Pin) string {
+	if installedVersion == "" {
+		installedVersion = "<none>"
+	}
+	return fmt.Sprintf("installed runtime version: %s\npinned runtime version: %s\npinned hash: %s", installedVersion, pin.Version, pin.Hash)
+}
+
+func renderTarget(target string, def model.Definition, adapters []render.AdapterByName) error {
+	requested := renderTargetList(target)
+	adapterByName := map[string]render.AdapterByName{}
+	for _, adapter := range adapters {
+		adapterByName[adapter.Name] = adapter
+	}
+	targeted := []render.AdapterByName{}
+	missing := []string{}
+	for _, name := range requested {
+		adapter, ok := adapterByName[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		targeted = append(targeted, adapter)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("no render adapter for target %q", strings.Join(missing, ","))
+	}
+	if len(targeted) == 0 {
+		return fmt.Errorf("no render adapter for target %q", target)
+	}
+	snapshots := []adapterSnapshot{}
+	if len(targeted) > 1 {
+		for _, adapter := range targeted {
+			restorable, ok := adapter.Adapter.(restorableAdapter)
+			if !ok {
+				return fmt.Errorf("adapter %q does not support rollback", adapter.Name)
+			}
+			snapshot, err := restorable.Snapshot()
+			if err != nil {
+				return fmt.Errorf("snapshot %s target: %w", adapter.Name, err)
+			}
+			snapshots = append(snapshots, adapterSnapshot{adapter: restorable, snapshot: snapshot})
+		}
+	}
+	for _, adapter := range targeted {
+		if err := adapter.Adapter.Render(def); err != nil {
+			if rollbackErr := restoreSnapshots(snapshots); rollbackErr != nil {
+				return fmt.Errorf("render %s target: %w; rollback: %w", adapter.Name, err, rollbackErr)
+			}
+			return fmt.Errorf("render %s target: %w", adapter.Name, err)
+		}
+	}
+	return nil
+}
+
+type restorableAdapter interface {
+	Snapshot() (any, error)
+	Restore(any) error
+}
+
+type adapterSnapshot struct {
+	adapter  restorableAdapter
+	snapshot any
+}
+
+func restoreSnapshots(snapshots []adapterSnapshot) error {
+	var errs []error
+	for idx := len(snapshots) - 1; idx >= 0; idx-- {
+		if err := snapshots[idx].adapter.Restore(snapshots[idx].snapshot); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func renderTargetList(target string) []string {
+	if target == "both" {
+		return []string{"claude", "codex"}
+	}
+	names := []string{}
+	seen := map[string]bool{}
+	for _, part := range strings.Split(target, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" && !seen[part] {
+			names = append(names, part)
+			seen[part] = true
+		}
+	}
+	return names
 }

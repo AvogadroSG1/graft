@@ -4,7 +4,7 @@ This guide gets you from zero to your first pull request in under 10 minutes.
 
 ## Prerequisites
 
-- Go 1.26 or later
+- Go 1.26.2 or later
 - git
 - golangci-lint (optional — `make lint` can invoke it via `go run`)
 
@@ -73,14 +73,16 @@ docs/               additional documentation
 Definitions live in a git-backed library under `mcps/*.json`. Each file describes one MCP server and follows the `model.Definition` schema:
 
 - **name** — unique identifier used in the lock file and rendered configs
-- **runtime** — one of `npm`, `docker`, or `uvx`; determines which pin validator applies
-- **command** / **args** — the invocation graft writes into the target config
-- **version** / **pin** — the resolved, pinned version written to `graft.lock`
+- **type** — optional remote transport type such as `http` or `sse`; empty means stdio
+- **command** / **args** — the stdio invocation graft writes into the target config
+- **url** / **headers** — remote transport endpoint and placeholder-based headers
+- **version** / **pin** — the resolved, pinned version written to `graft.lock`; `pin.runtime` is one of `npm`, `docker`, or `uvx`
 - **env** — environment variables the server requires (values left for the consumer to fill)
+- **adapters** — optional Claude/Codex-specific overrides for transport fields
 
-Definitions are stored in a library repository that graft clones locally. Use `graft library add <url>` to register a library, `graft library pull` to update it, and `graft show <name>` to inspect a definition.
+Definitions are stored in a library repository that graft clones locally. Use `graft library add <name> <https-url>` to register a library, `graft library pull [name]` to update one or all libraries, `graft library show [name]` to browse definitions, and `graft library show <name> <mcp>` to inspect a full definition.
 
-To author a new definition: create `mcps/<name>.json` in a library repo, validate it locally with `graft status`, and push via `graft push`.
+To author a new definition: create `mcps/<name>.json` in a library repo, validate it locally with `graft status`, and push via `graft mcp push --yes`.
 
 ## Generating Mocks
 
@@ -109,7 +111,7 @@ Short imperative summary (72 chars max)
 Longer explanation if needed.
 
 Co-Authored-By: Peter O'Connor <poconnor@stackoverflow.com>
-Co-Authored-By: Claude Code <noreply@anthropic.com>
+Co-Authored-By: Codex <noreply@anthropic.com> - GPT-5
 ```
 
 Use the imperative mood in the subject line ("Add sync retry logic", not "Added" or "Adds").

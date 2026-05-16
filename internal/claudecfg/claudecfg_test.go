@@ -255,8 +255,8 @@ func TestLoadHTTPRoundTripRendersClaudeAndCodex(t *testing.T) {
 		t.Fatalf("parse Codex output: %v", err)
 	}
 	codexServer := codexDoc.MCPServers["remote"]
-	if codexServer.Type != "http" || codexServer.URL != "https://example.com/mcp" || codexServer.Command != "" || codexServer.Headers != nil {
-		t.Fatalf("Codex output = %+v, want HTTP type/url only", codexServer)
+	if codexServer.Type != "http" || codexServer.URL != "https://example.com/mcp" || codexServer.Headers["Authorization"] != "${Authorization}" || codexServer.Command != "" {
+		t.Fatalf("Codex output = %+v, want redacted HTTP transport only", codexServer)
 	}
 }
 

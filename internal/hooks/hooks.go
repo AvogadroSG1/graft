@@ -18,18 +18,26 @@ const Marker = "# graft managed hook"
 const EndMarker = "# end graft managed hook"
 
 // DefaultRCPath returns the default shell rc file path for the current OS.
-// On Windows it returns the WindowsPowerShell profile; on Unix it returns ~/.zshrc.
+// On Windows it returns the WindowsPowerShell profile; on Unix it uses $SHELL
+// to choose ~/.bashrc for bash and ~/.zshrc otherwise.
 func DefaultRCPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	return defaultRCPathForOS(runtime.GOOS, home), nil
+	return defaultRCPathForShell(runtime.GOOS, home, os.Getenv("SHELL")), nil
 }
 
 func defaultRCPathForOS(goos, home string) string {
+	return defaultRCPathForShell(goos, home, "")
+}
+
+func defaultRCPathForShell(goos, home, shell string) string {
 	if goos == "windows" {
 		return filepath.Join(home, "Documents", "WindowsPowerShell", "Microsoft.PowerShell_profile.ps1")
+	}
+	if filepath.Base(shell) == "bash" {
+		return filepath.Join(home, ".bashrc")
 	}
 	return filepath.Join(home, ".zshrc")
 }
@@ -46,7 +54,7 @@ func shellSnippetForOS(goos string) string {
 			EndMarker + "\n"
 	}
 	return Marker + "\n" +
-		"graft_cd() { builtin cd \"$@\" && command -v graft >/dev/null && [[ -f graft.lock ]] && graft status --quiet; }\n" +
+		"graft_cd() { builtin cd \"$@\" || return; command -v graft >/dev/null && [[ -f graft.lock ]] && graft status --quiet || true; }\n" +
 		"alias cd=graft_cd\n" +
 		EndMarker + "\n"
 }
@@ -62,15 +70,16 @@ func InstallShellHook(rcPath string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read rc file: %w", err)
 	}
-	file, err := os.OpenFile(rcPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("open rc file: %w", err)
+	if err := os.MkdirAll(filepath.Dir(rcPath), 0o700); err != nil {
+		return fmt.Errorf("create rc dir: %w", err)
 	}
-	defer func() {
-		_ = file.Close()
-	}()
-	_, err = file.WriteString("\n" + snippet)
-	return err
+	next := append([]byte{}, data...)
+	if len(next) > 0 && !strings.HasSuffix(string(next), "\n") {
+		next = append(next, '\n')
+	}
+	next = append(next, '\n')
+	next = append(next, snippet...)
+	return fileutil.AtomicWriteFile(rcPath, next, 0o600)
 }
 
 // InstallPostCheckout writes a graft-managed post-checkout hook to <gitDir>/hooks/post-checkout.
@@ -80,15 +89,22 @@ func InstallPostCheckout(gitDir string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	content := "#!/bin/sh\n" + Marker + "\ncommand -v graft >/dev/null 2>&1 && graft status --quiet\n"
+	content := ownedPostCheckoutContent()
 	data, err := os.ReadFile(path)
 	if err == nil && !strings.Contains(string(data), Marker) {
 		return fmt.Errorf("refusing to overwrite unmanaged hook %q", path)
+	}
+	if err == nil && strings.TrimSpace(string(data)) != strings.TrimSpace(content) {
+		return fmt.Errorf("refusing to overwrite mixed hook %q", path)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return fileutil.AtomicWriteFile(path, []byte(content), 0o755)
+}
+
+func ownedPostCheckoutContent() string {
+	return "#!/bin/sh\n" + Marker + "\ncommand -v graft >/dev/null 2>&1 && graft status --quiet\n"
 }
 
 // Uninstall removes the graft-managed block from rcPath and deletes the post-checkout hook
@@ -107,7 +123,7 @@ func Uninstall(rcPath, gitDir string) error {
 		return err
 	}
 	text := string(data)
-	if strings.TrimSpace(text) == strings.TrimSpace("#!/bin/sh\n"+Marker+"\ncommand -v graft >/dev/null 2>&1 && graft status --quiet") {
+	if strings.TrimSpace(text) == strings.TrimSpace(ownedPostCheckoutContent()) {
 		return os.Remove(hookPath)
 	}
 	if strings.Contains(text, Marker) {
@@ -141,6 +157,9 @@ func removeShellBlock(rcPath string) error {
 			continue
 		}
 		next = append(next, line)
+	}
+	if skip {
+		return fmt.Errorf("refusing to remove unterminated graft shell block %q", rcPath)
 	}
 	return fileutil.AtomicWriteFile(rcPath, []byte(strings.Join(next, "\n")), 0o600)
 }
