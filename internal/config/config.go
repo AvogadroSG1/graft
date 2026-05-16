@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 
 	"github.com/poconnor/graft/internal/fileutil"
@@ -19,10 +21,49 @@ import (
 // CachePath is the local clone location (defaults to ~/.cache/graft/libraries/<name>).
 // The first registered library, or the one with Default: true, is used when no --library flag is given.
 type Library struct {
-	Name      string `json:"name"`
-	URL       string `json:"url"`
-	CachePath string `json:"cache_path"`
-	Default   bool   `json:"default"`
+	Name         string `json:"name"`
+	URL          string `json:"url"`
+	CachePath    string `json:"cache_path"`
+	LastPulledAt string `json:"last_pulled_at,omitempty"`
+	Default      bool   `json:"default"`
+}
+
+var libraryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+
+// ValidateLibraryName rejects names that could escape the default cache namespace
+// or create ambiguous config entries. Library names are intentionally slug-like.
+func ValidateLibraryName(name string) error {
+	if !libraryNamePattern.MatchString(name) {
+		return fmt.Errorf("invalid library name %q: use letters, numbers, underscores, and hyphens", name)
+	}
+	return nil
+}
+
+// ValidateLibraryURL accepts HTTPS git remotes without embedded credentials.
+// Local paths, file URLs, scp-like SSH syntax, and userinfo are rejected before
+// any clone or config persistence can occur.
+func ValidateLibraryURL(raw string) error {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid library url %q: %w", raw, err)
+	}
+	if parsed.Scheme != "https" || parsed.Host == "" {
+		return fmt.Errorf("invalid library url %q: expected https://host/path", raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("invalid library url %q: embedded credentials are not allowed", RedactLibraryURL(raw))
+	}
+	return nil
+}
+
+// RedactLibraryURL removes URL userinfo before displaying a configured remote.
+func RedactLibraryURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User == nil {
+		return raw
+	}
+	parsed.User = url.User("redacted")
+	return parsed.String()
 }
 
 // Config is the root of the graft global configuration.
@@ -128,6 +169,9 @@ func (c Config) Library(name string) (Library, bool) {
 // marked as the default when the config was previously empty.
 func (c Config) WithLibrary(lib Library) (Config, error) {
 	next := Config{Libraries: slices.Clone(c.Libraries)}
+	if err := ValidateLibraryName(lib.Name); err != nil {
+		return next, err
+	}
 	if lib.CachePath == "" {
 		cachePath, err := defaultCachePath(lib.Name)
 		if err != nil {

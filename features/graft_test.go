@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,7 +25,7 @@ type featureState struct {
 	output     bytes.Buffer
 	err        error
 	picked     []lock.InstalledMCP
-	pickClient featureLibraryClient
+	pickClient *featureLibraryClient
 	pickRunner func(context.Context, tui.PickModel) (tui.PickModel, error)
 }
 
@@ -58,18 +59,18 @@ func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^a Codex config\.toml file$`, s.codexFile)
 	ctx.Step(`^I run graft mcp import$`, s.noop)
 	ctx.Step(`^canonical MCP definitions are written$`, s.noop)
-	ctx.Step(`^a git-backed MCP library URL$`, s.noop)
-	ctx.Step(`^I run graft library add$`, s.noop)
-	ctx.Step(`^the library is saved in user config$`, s.noop)
-	ctx.Step(`^a registered library$`, s.noop)
-	ctx.Step(`^I run graft library pull$`, s.noop)
-	ctx.Step(`^the latest commit SHA is reported$`, s.noop)
-	ctx.Step(`^a registered library with an index$`, s.noop)
-	ctx.Step(`^I run graft library show$`, s.noop)
-	ctx.Step(`^MCP name, version, tags, and description are shown$`, s.noop)
-	ctx.Step(`^graft\.lock references an unregistered library$`, s.noop)
-	ctx.Step(`^graft loads the lock$`, s.noop)
-	ctx.Step(`^the unknown library auto-registration flow starts$`, s.noop)
+	ctx.Step(`^a git-backed MCP library URL$`, s.gitBackedLibraryURL)
+	ctx.Step(`^I run graft library add$`, s.runLibraryAdd)
+	ctx.Step(`^the library is saved in user config$`, s.librarySavedInUserConfig)
+	ctx.Step(`^a registered library$`, s.registeredLibrary)
+	ctx.Step(`^I run graft library pull$`, s.runLibraryPull)
+	ctx.Step(`^the latest commit SHA is reported$`, s.latestCommitSHAReported)
+	ctx.Step(`^a registered library with an index$`, s.registeredLibraryWithIndex)
+	ctx.Step(`^I run graft library show$`, s.runLibraryShow)
+	ctx.Step(`^MCP name, version, tags, and description are shown$`, s.mcpSummaryShown)
+	ctx.Step(`^graft\.lock references an unregistered library$`, s.lockReferencesUnregisteredLibrary)
+	ctx.Step(`^graft loads the lock$`, s.graftLoadsLock)
+	ctx.Step(`^the unknown library auto-registration flow starts$`, s.unknownLibraryAutoRegistrationFlowStarts)
 	ctx.Step(`^a project with graft\.lock$`, s.noop)
 	ctx.Step(`^I run graft status$`, s.noop)
 	ctx.Step(`^one of the seven drift states is returned$`, s.noop)
@@ -105,13 +106,17 @@ func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
 }
 
 func (s *featureState) registeredDefaultLibrary() error {
-	s.root, _ = os.MkdirTemp("", "graft-feature-root-*")
+	root, err := os.MkdirTemp("", "graft-feature-root-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
 	s.configPath = filepath.Join(s.root, "config.json")
 	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
 	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{}}}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{}}}
 	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 		return next.(tui.PickModel), nil
@@ -144,8 +149,155 @@ func (s *featureState) codexFile() error {
 	return nil
 }
 
+func (s *featureState) gitBackedLibraryURL() error {
+	root, err := os.MkdirTemp("", "graft-feature-library-add-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	s.pickClient = &featureLibraryClient{}
+	return nil
+}
+
+func (s *featureState) runLibraryAdd() error {
+	command := cmd.NewLibraryCommandForTest(context.Background(), s.configPath, s.root, s.pickClient)
+	command.SetArgs([]string{"add", "core", "https://example.com/core.git"})
+	command.SetOut(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) librarySavedInUserConfig() error {
+	cfg, err := (config.FileStore{}).Load(s.configPath)
+	if err != nil {
+		return err
+	}
+	lib, ok := cfg.Library("core")
+	if !ok || lib.URL != "https://example.com/core.git" || lib.CachePath == "" || !lib.Default {
+		return fmt.Errorf("config library = %+v, %v", lib, ok)
+	}
+	return nil
+}
+
+func (s *featureState) registeredLibrary() error {
+	root, err := os.MkdirTemp("", "graft-feature-library-pull-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
+	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		return err
+	}
+	s.pickClient = &featureLibraryClient{pullSHA: "abc123"}
+	return nil
+}
+
+func (s *featureState) runLibraryPull() error {
+	command := cmd.NewLibraryCommandForTest(context.Background(), s.configPath, s.root, s.pickClient)
+	command.SetArgs([]string{"pull"})
+	command.SetOut(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) latestCommitSHAReported() error {
+	if !strings.Contains(s.output.String(), "core\tabc123") {
+		return fmt.Errorf("stdout = %q", s.output.String())
+	}
+	cfg, err := (config.FileStore{}).Load(s.configPath)
+	if err != nil {
+		return err
+	}
+	lib, _ := cfg.Library("core")
+	if lib.LastPulledAt == "" {
+		return fmt.Errorf("last_pulled_at was not saved")
+	}
+	return nil
+}
+
+func (s *featureState) registeredLibraryWithIndex() error {
+	root, err := os.MkdirTemp("", "graft-feature-library-show-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
+	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		return err
+	}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", Tags: []string{"docs", "productivity"}, Description: "Documentation server", SHA256: "hash-docs"}}}}
+	return nil
+}
+
+func (s *featureState) runLibraryShow() error {
+	command := cmd.NewLibraryCommandForTest(context.Background(), s.configPath, s.root, s.pickClient)
+	command.SetArgs([]string{"show"})
+	command.SetOut(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) mcpSummaryShown() error {
+	got := s.output.String()
+	for _, want := range []string{"docs", "1.0.0", "docs,productivity", "Documentation server"} {
+		if !strings.Contains(got, want) {
+			return fmt.Errorf("stdout = %q, want %q", got, want)
+		}
+	}
+	return nil
+}
+
+func (s *featureState) lockReferencesUnregisteredLibrary() error {
+	root, err := os.MkdirTemp("", "graft-feature-unknown-library-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	if err := (config.FileStore{}).Save(s.configPath, config.Config{}); err != nil {
+		return err
+	}
+	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}}}); err != nil {
+		return err
+	}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{}}}
+	return nil
+}
+
+func (s *featureState) graftLoadsLock() error {
+	command := cmd.NewStatusCommandForTest(s.configPath, s.root, s.pickClient)
+	command.SetIn(strings.NewReader("\n"))
+	command.SetOut(&s.output)
+	command.SetErr(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) unknownLibraryAutoRegistrationFlowStarts() error {
+	got := s.output.String()
+	if !strings.Contains(got, "Register and clone") {
+		return fmt.Errorf("stdout/stderr = %q", got)
+	}
+	cfg, err := (config.FileStore{}).Load(s.configPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Library("core"); !ok {
+		return fmt.Errorf("core library was not registered")
+	}
+	return nil
+}
+
 func (s *featureState) libraryIndex() error {
-	s.root, _ = os.MkdirTemp("", "graft-feature-pick-*")
+	root, err := os.MkdirTemp("", "graft-feature-pick-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
 	s.configPath = filepath.Join(s.root, "config.json")
 	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
 	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
@@ -154,7 +306,7 @@ func (s *featureState) libraryIndex() error {
 	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", Description: "Documentation server", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", Description: "Documentation server", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 		if len(model.Items) != 1 || model.Items[0].Library != "core" || model.Items[0].Entry.Name != "docs" {
 			return tui.PickModel{}, fmt.Errorf("picker items = %+v", model.Items)
@@ -181,13 +333,17 @@ func (s *featureState) mcpsGroupedByLibrary() error {
 }
 
 func (s *featureState) lockHasSelectedMCPs() error {
-	s.root, _ = os.MkdirTemp("", "graft-feature-repick-*")
+	root, err := os.MkdirTemp("", "graft-feature-repick-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
 	s.configPath = filepath.Join(s.root, "config.json")
 	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
 	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	return (lock.FileStore{}).Save(s.root, lock.Lock{
 		Libraries: []lock.LibraryRef{{Name: "core", URL: "https://example.com/core.git"}},
 		MCPs: []lock.InstalledMCP{{
@@ -220,7 +376,11 @@ func (s *featureState) existingMCPsPreselected() error {
 }
 
 func (s *featureState) confirmSelections() error {
-	s.root, _ = os.MkdirTemp("", "graft-feature-confirm-*")
+	root, err := os.MkdirTemp("", "graft-feature-confirm-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
 	s.configPath = filepath.Join(s.root, "config.json")
 	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
 	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
@@ -229,7 +389,7 @@ func (s *featureState) confirmSelections() error {
 	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{}}); err != nil {
 		return err
 	}
-	s.pickClient = featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
+	s.pickClient = &featureLibraryClient{index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}}, def: model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Args: []string{"docs"}}, hash: "hash-docs"}
 	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
 		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
 		model = next.(tui.PickModel)
@@ -263,23 +423,26 @@ func (s *featureState) noop() error {
 }
 
 type featureLibraryClient struct {
-	index model.LibraryIndex
-	def   model.Definition
-	hash  string
+	index   model.LibraryIndex
+	def     model.Definition
+	hash    string
+	pullSHA string
 }
 
-func (c featureLibraryClient) Add(context.Context, config.Library) error { return nil }
+func (c *featureLibraryClient) Add(context.Context, config.Library) error { return nil }
 
-func (c featureLibraryClient) Pull(context.Context, config.Library) (string, error) { return "", nil }
+func (c *featureLibraryClient) Pull(context.Context, config.Library) (string, error) {
+	return c.pullSHA, nil
+}
 
-func (c featureLibraryClient) Index(config.Library) (model.LibraryIndex, error) { return c.index, nil }
+func (c *featureLibraryClient) Index(config.Library) (model.LibraryIndex, error) { return c.index, nil }
 
-func (c featureLibraryClient) Definition(config.Library, string) (model.Definition, string, error) {
+func (c *featureLibraryClient) Definition(config.Library, string) (model.Definition, string, error) {
 	return c.def, c.hash, nil
 }
 
-func (c featureLibraryClient) Reindex(config.Library) (model.LibraryIndex, error) {
+func (c *featureLibraryClient) Reindex(config.Library) (model.LibraryIndex, error) {
 	return model.LibraryIndex{}, nil
 }
 
-var _ library.Client = featureLibraryClient{}
+var _ library.Client = (*featureLibraryClient)(nil)

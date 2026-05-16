@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/poconnor/graft/internal/claudecfg"
@@ -160,18 +161,22 @@ func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 }
 
 func newLibraryCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+	return newLibraryCommandWithDeps(ctx, opts, library.GitClient{})
+}
+
+func newLibraryCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client) *cobra.Command {
 	cmd := &cobra.Command{Use: "library", Short: "Manage MCP libraries", Args: cobra.NoArgs}
 	cmd.AddCommand(
-		newLibraryAddCommand(ctx, opts),
+		newLibraryAddCommand(ctx, opts, client),
 		newLibraryListCommand(opts),
-		newLibraryPullCommand(ctx, opts),
-		newLibraryShowCommand(opts),
+		newLibraryPullCommand(ctx, opts, client),
+		newLibraryShowCommand(opts, client),
 		newLibraryMigrateFromClaudeCommand(ctx, opts),
 	)
 	return cmd
 }
 
-func newLibraryAddCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+func newLibraryAddCommand(ctx context.Context, opts *appOptions, client library.Client) *cobra.Command {
 	var cachePath string
 	cmd := &cobra.Command{
 		Use:   "add <name> <url>",
@@ -182,13 +187,22 @@ func newLibraryAddCommand(ctx context.Context, opts *appOptions) *cobra.Command 
 			if err != nil {
 				return err
 			}
+			if err := config.ValidateLibraryName(args[0]); err != nil {
+				return err
+			}
+			if err := config.ValidateLibraryURL(args[1]); err != nil {
+				return err
+			}
+			if _, ok := cfg.Library(args[0]); ok {
+				return fmt.Errorf("library %q is already registered", args[0])
+			}
 			lib := config.Library{Name: args[0], URL: args[1], CachePath: cachePath}
 			cfg, err = cfg.WithLibrary(lib)
 			if err != nil {
 				return err
 			}
 			lib, _ = cfg.Library(args[0])
-			if err := (library.GitClient{}).Add(ctx, lib); err != nil {
+			if err := client.Add(ctx, lib); err != nil {
 				return err
 			}
 			if err := saveConfig(opts.configPath, cfg); err != nil {
@@ -216,7 +230,11 @@ func newLibraryListCommand(opts *appOptions) *cobra.Command {
 				if lib.Default {
 					marker = " default"
 				}
-				if err := printf(cmd, "%s\t%s\t%s%s\n", lib.Name, lib.URL, lib.CachePath, marker); err != nil {
+				pulledAt := lib.LastPulledAt
+				if pulledAt == "" {
+					pulledAt = "-"
+				}
+				if err := printf(cmd, "%s\t%s\t%s\t%s%s\n", lib.Name, config.RedactLibraryURL(lib.URL), lib.CachePath, pulledAt, marker); err != nil {
 					return err
 				}
 			}
@@ -225,7 +243,7 @@ func newLibraryListCommand(opts *appOptions) *cobra.Command {
 	}
 }
 
-func newLibraryPullCommand(ctx context.Context, opts *appOptions) *cobra.Command {
+func newLibraryPullCommand(ctx context.Context, opts *appOptions, client library.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pull [name]",
 		Short: "Pull one or all libraries",
@@ -243,9 +261,19 @@ func newLibraryPullCommand(ctx context.Context, opts *appOptions) *cobra.Command
 				}
 				libs = []config.Library{lib}
 			}
+			now := time.Now().UTC().Format(time.RFC3339)
+			updated := cfg
 			for _, lib := range libs {
-				sha, err := (library.GitClient{}).Pull(ctx, lib)
+				sha, err := client.Pull(ctx, lib)
 				if err != nil {
+					return err
+				}
+				lib.LastPulledAt = now
+				updated, err = updated.WithLibrary(lib)
+				if err != nil {
+					return err
+				}
+				if err := saveConfig(opts.configPath, updated); err != nil {
 					return err
 				}
 				if err := printf(cmd, "%s\t%s\n", lib.Name, sha); err != nil {
@@ -257,7 +285,7 @@ func newLibraryPullCommand(ctx context.Context, opts *appOptions) *cobra.Command
 	}
 }
 
-func newLibraryShowCommand(opts *appOptions) *cobra.Command {
+func newLibraryShowCommand(opts *appOptions, client library.Client) *cobra.Command {
 	var tag string
 	var jsonOutput bool
 	cmd := &cobra.Command{
@@ -276,25 +304,22 @@ func newLibraryShowCommand(opts *appOptions) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no library configured")
 			}
-			client := library.GitClient{}
 			if len(args) == 2 {
 				def, _, err := client.Definition(lib, args[1])
 				if err != nil {
 					return err
 				}
-				return writeValue(cmd, jsonOutput, def)
+				return writeValue(cmd, true, def)
 			}
 			index, err := client.Index(lib)
 			if err != nil {
 				return err
 			}
-			for _, entry := range index.MCPs {
-				if tag != "" && !contains(entry.Tags, tag) {
-					continue
-				}
-				if jsonOutput {
-					continue
-				}
+			filtered := filterLibraryIndex(index, tag)
+			if jsonOutput {
+				return writeValue(cmd, true, filtered)
+			}
+			for _, entry := range filtered.MCPs {
 				if err := printf(
 					cmd,
 					"%s\t%s\t%s\t%s\n",
@@ -306,15 +331,25 @@ func newLibraryShowCommand(opts *appOptions) *cobra.Command {
 					return err
 				}
 			}
-			if jsonOutput {
-				return writeValue(cmd, true, index)
-			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&tag, "tag", "", "filter by tag")
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON (detail view always emits JSON)")
 	return cmd
+}
+
+func filterLibraryIndex(index model.LibraryIndex, tag string) model.LibraryIndex {
+	if tag == "" {
+		return index
+	}
+	filtered := model.LibraryIndex{Name: index.Name, MCPs: []model.IndexEntry{}}
+	for _, entry := range index.MCPs {
+		if contains(entry.Tags, tag) {
+			filtered.MCPs = append(filtered.MCPs, entry)
+		}
+	}
+	return filtered
 }
 
 func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *cobra.Command {
@@ -1192,6 +1227,12 @@ func ensureLockLibrariesRegistered(ctx context.Context, cmd *cobra.Command, opts
 		if ref.URL == "" {
 			return next, fmt.Errorf("library %q is not registered; graft.lock does not include a URL", ref.Name)
 		}
+		if err := config.ValidateLibraryName(ref.Name); err != nil {
+			return next, err
+		}
+		if err := config.ValidateLibraryURL(ref.URL); err != nil {
+			return next, err
+		}
 		if err := eprintf(cmd, "Library %q from graft.lock is not registered: %s\nRegister and clone it now? [Y/n] ", ref.Name, ref.URL); err != nil {
 			return next, err
 		}
@@ -1385,6 +1426,18 @@ func NewPickCommandForTest(ctx context.Context, configPath, root string, client 
 // tests that need to avoid a real terminal picker or git-backed library cache.
 func NewInitCommandForTest(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error)) *cobra.Command {
 	return newInitCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
+}
+
+// NewLibraryCommandForTest exposes the dependency-injected library command to
+// BDD tests that need deterministic git-backed library behavior.
+func NewLibraryCommandForTest(ctx context.Context, configPath, root string, client library.Client) *cobra.Command {
+	return newLibraryCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client)
+}
+
+// NewStatusCommandForTest exposes the dependency-injected status command to
+// BDD tests that need to avoid real git-backed library caches.
+func NewStatusCommandForTest(configPath, root string, client library.Client) *cobra.Command {
+	return newStatusCommandWithDeps(&appOptions{configPath: configPath, root: root}, client)
 }
 
 func runBubbleteaPick(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
