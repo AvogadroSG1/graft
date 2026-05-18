@@ -1,1 +1,12 @@
 [mcp_servers]
+  [mcp_servers."Stack Internal"]
+    _graft_managed = true
+    args = ["mcp-remote", "https://stackinternal.stackenterprise.co/mcp"]
+    command = "npx"
+  [mcp_servers.serena]
+    _graft_managed = true
+    args = ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context=claude-code", "--enable-web-dashboard=false", "--project-from-cwd"]
+    command = "uvx"
+    [mcp_servers.serena.env]
+      REQUESTS_CA_BUNDLE = "${REQUESTS_CA_BUNDLE}"
+      SSL_CERT_FILE = "${SSL_CERT_FILE}"

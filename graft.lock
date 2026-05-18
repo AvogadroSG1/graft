@@ -1,0 +1,24 @@
+{
+  "libraries": [
+    {
+      "name": "peter_mcps",
+      "url": "/Users/poconnor/.cache/graft/libraries/peter_mcps"
+    }
+  ],
+  "mcps": [
+    {
+      "name": "Stack Internal",
+      "library": "peter_mcps",
+      "version": "0.1.0",
+      "definition_hash": "8a03ca880bae39e2ba55c5624a80a0a8fccdd82ed891e7bca486361b542fd03b",
+      "target": "both"
+    },
+    {
+      "name": "serena",
+      "library": "peter_mcps",
+      "version": "0.1.0",
+      "definition_hash": "05e0e14f55b8fb90f47372af612edba29dc062821b7ff3e44572b5f01529a105",
+      "target": "both"
+    }
+  ]
+}
