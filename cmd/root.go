@@ -472,27 +472,44 @@ func printClaudeMigrationDryRun(cmd *cobra.Command, groups []claudecfg.Group) er
 	return nil
 }
 
+func ensureLibraryCachePath(cfg config.Config, lib config.Library) (config.Config, config.Library, error) {
+	if lib.CachePath != "" {
+		return cfg, lib, nil
+	}
+	next, err := cfg.WithLibrary(lib)
+	if err != nil {
+		return cfg, lib, err
+	}
+	updated, _ := next.Library(lib.Name)
+	return next, updated, nil
+}
+
+func ensureLibraryURL(cfg config.Config, lib config.Library) (config.Config, config.Library, error) {
+	if lib.URL != "" {
+		return cfg, lib, nil
+	}
+	lib.URL = lib.CachePath
+	next, err := cfg.WithLibrary(lib)
+	if err != nil {
+		return cfg, lib, err
+	}
+	updated, _ := next.Library(lib.Name)
+	return next, updated, nil
+}
+
 func prepareLocalLibraryConfig(cfg config.Config, name string) (config.Config, config.Library, error) {
 	if err := library.ValidateMCPName(name); err != nil {
 		return cfg, config.Library{}, err
 	}
 	if existing, ok := cfg.Library(name); ok {
-		if existing.CachePath == "" {
-			next, err := cfg.WithLibrary(existing)
-			if err != nil {
-				return cfg, config.Library{}, err
-			}
-			existing, _ = next.Library(name)
-			cfg = next
+		var err error
+		cfg, existing, err = ensureLibraryCachePath(cfg, existing)
+		if err != nil {
+			return cfg, config.Library{}, err
 		}
-		if existing.URL == "" {
-			existing.URL = existing.CachePath
-			next, err := cfg.WithLibrary(existing)
-			if err != nil {
-				return cfg, config.Library{}, err
-			}
-			existing, _ = next.Library(name)
-			cfg = next
+		cfg, existing, err = ensureLibraryURL(cfg, existing)
+		if err != nil {
+			return cfg, config.Library{}, err
 		}
 		return cfg, existing, nil
 	}
