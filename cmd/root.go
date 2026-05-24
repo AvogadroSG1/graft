@@ -988,6 +988,44 @@ func newStatusCommandWithDeps(opts *appOptions, client library.Client) *cobra.Co
 	return cmd
 }
 
+func pullSyncLibraries(ctx context.Context, client library.Client, libs []config.Library, noPull bool) error {
+	if noPull {
+		return nil
+	}
+	for _, lib := range libs {
+		if _, err := client.Pull(ctx, lib); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildActiveSyncAdapters(root string, override []render.AdapterByName) []render.AdapterByName {
+	if override != nil {
+		return override
+	}
+	return []render.AdapterByName{
+		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
+		{Name: "codex", Adapter: render.NewCodexAdapter(root)},
+	}
+}
+
+func buildPinMismatchConfirmer(cmd *cobra.Command) func(string) (string, error) {
+	return func(diff string) (string, error) {
+		if err := eprintf(cmd, "SECURITY WARNING: pin mismatch detected.\n%s\nType 'I understand the risk' to continue: ", diff); err != nil {
+			return "", err
+		}
+		answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
+		if err != nil {
+			return "", err
+		}
+		if !hasInput {
+			return "", fmt.Errorf("SECURITY WARNING: forced pin mismatch requires confirmation phrase")
+		}
+		return answer, nil
+	}
+}
+
 func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newSyncCommandWithDeps(ctx, opts, library.GitClient{}, nil)
 }
@@ -1016,12 +1054,8 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			if !noPull {
-				for _, lib := range pullLibraries {
-					if _, err := client.Pull(ctx, lib); err != nil {
-						return err
-					}
-				}
+			if err := pullSyncLibraries(ctx, client, pullLibraries, noPull); err != nil {
+				return err
 			}
 			if len(lk.MCPs) == 0 {
 				return writeValue(cmd, true, graftsync.Result{
@@ -1033,32 +1067,11 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 					Lock:      lk,
 				})
 			}
-			activeAdapters := adapters
-			if activeAdapters == nil {
-				activeAdapters = []render.AdapterByName{
-					{Name: "claude", Adapter: render.NewClaudeAdapter(opts.root)},
-					{Name: "codex", Adapter: render.NewCodexAdapter(opts.root)},
-				}
-			}
-			result := graftsync.ApplyWithOptions(
-				lk,
-				cfg,
-				client,
-				activeAdapters,
-				graftsync.Options{Names: args, ForcePins: forcePins, ConfirmPinMismatch: func(diff string) (string, error) {
-					if err := eprintf(cmd, "SECURITY WARNING: pin mismatch detected.\n%s\nType 'I understand the risk' to continue: ", diff); err != nil {
-						return "", err
-					}
-					answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
-					if err != nil {
-						return "", err
-					}
-					if !hasInput {
-						return "", fmt.Errorf("SECURITY WARNING: forced pin mismatch requires confirmation phrase")
-					}
-					return answer, nil
-				}},
-			)
+			result := graftsync.ApplyWithOptions(lk, cfg, client, buildActiveSyncAdapters(opts.root, adapters), graftsync.Options{
+				Names:              args,
+				ForcePins:          forcePins,
+				ConfirmPinMismatch: buildPinMismatchConfirmer(cmd),
+			})
 			if err := (lock.FileStore{}).Save(opts.root, result.Lock); err != nil {
 				return err
 			}
