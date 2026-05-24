@@ -598,6 +598,19 @@ func newMCPCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return cmd
 }
 
+func importDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
+	if hasAuthFields(def) {
+		answer, err := promptLine(cmd, reader, fmt.Sprintf("Import auth placeholders for %s? [y/N] ", def.Name))
+		if err != nil {
+			return false, err
+		}
+		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			return false, printf(cmd, "skipped %s\n", def.Name)
+		}
+	}
+	return writeImportedDefinition(cmd, reader, lib, def)
+}
+
 func newMCPImportCommand(opts *appOptions) *cobra.Command {
 	var from string
 	cmd := &cobra.Command{
@@ -622,19 +635,7 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 			}
 			reader := bufio.NewReader(cmd.InOrStdin())
 			for _, def := range defs {
-				if hasAuthFields(def) {
-					answer, err := promptLine(cmd, reader, fmt.Sprintf("Import auth placeholders for %s? [y/N] ", def.Name))
-					if err != nil {
-						return err
-					}
-					if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-						if err := printf(cmd, "skipped %s\n", def.Name); err != nil {
-							return err
-						}
-						continue
-					}
-				}
-				written, err := writeImportedDefinition(cmd, reader, lib, def)
+				written, err := importDefinition(cmd, reader, lib, def)
 				if err != nil {
 					return err
 				}
