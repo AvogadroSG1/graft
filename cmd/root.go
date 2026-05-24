@@ -1564,6 +1564,26 @@ func lockWithConfiguredLibraries(lk lock.Lock, cfg config.Config) lock.Lock {
 	return next
 }
 
+func buildMCPMap(mcps []lock.InstalledMCP) map[string]lock.InstalledMCP {
+	m := map[string]lock.InstalledMCP{}
+	for _, mcp := range mcps {
+		m[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	return m
+}
+
+func removeStalePickTargets(adapters []render.AdapterByName, oldMCPs, nextMCPs map[string]lock.InstalledMCP) error {
+	for key, oldMCP := range oldMCPs {
+		nextMCP, ok := nextMCPs[key]
+		if !ok || oldMCP.Target != nextMCP.Target || oldMCP.DefinitionHash != nextMCP.DefinitionHash {
+			if err := removePickTargets(adapters, oldMCP); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func savePickResultWithSideEffects(root string, cfg config.Config, client library.Client, old lock.Lock, next lock.Lock) error {
 	adapters := []render.AdapterByName{
 		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
@@ -1573,21 +1593,8 @@ func savePickResultWithSideEffects(root string, cfg config.Config, client librar
 	if err != nil {
 		return err
 	}
-	oldMCPs := map[string]lock.InstalledMCP{}
-	for _, mcp := range old.MCPs {
-		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
-	}
-	nextMCPs := map[string]lock.InstalledMCP{}
-	for _, mcp := range next.MCPs {
-		nextMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
-	}
-	for key, oldMCP := range oldMCPs {
-		nextMCP, ok := nextMCPs[key]
-		if !ok || oldMCP.Target != nextMCP.Target || oldMCP.DefinitionHash != nextMCP.DefinitionHash {
-			if err := removePickTargets(adapters, oldMCP); err != nil {
-				return rollbackPickSideEffects(snapshots, err)
-			}
-		}
+	if err := removeStalePickTargets(adapters, buildMCPMap(old.MCPs), buildMCPMap(next.MCPs)); err != nil {
+		return rollbackPickSideEffects(snapshots, err)
 	}
 	resultLock := next
 	if syncNames := pickSyncNames(old, next); len(syncNames) > 0 {
