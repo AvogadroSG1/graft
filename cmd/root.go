@@ -377,6 +377,46 @@ func filterLibraryIndex(index model.LibraryIndex, tag string) model.LibraryIndex
 	return filtered
 }
 
+func resolveSourcePath(from string) (string, error) {
+	if from != "" {
+		return from, nil
+	}
+	return claudecfg.DefaultPath()
+}
+
+func writeApprovedMCPs(cmd *cobra.Command, lib config.Library, mcps []claudecfg.MCP) error {
+	for _, mcp := range mcps {
+		if _, err := library.WriteDefinition(lib, mcp.Definition); err != nil {
+			return err
+		}
+		if err := printf(cmd, "imported %s\n", mcp.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runClaudeMigration(ctx context.Context, cmd *cobra.Command, opts *appOptions, lib config.Library, force bool, groups []claudecfg.Group, cfg config.Config) error {
+	client := library.GitClient{}
+	if err := client.InitLocal(ctx, lib, force); err != nil {
+		return err
+	}
+	approved, err := approveClaudeMCPs(cmd, groups)
+	if err != nil {
+		return err
+	}
+	if err := writeApprovedMCPs(cmd, lib, approved); err != nil {
+		return err
+	}
+	if _, err := client.Reindex(lib); err != nil {
+		return err
+	}
+	if err := client.CommitAll(ctx, lib.CachePath, "Initial import from ~/.claude.json"); err != nil {
+		return err
+	}
+	return saveConfig(opts.configPath, cfg)
+}
+
 func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	var from string
 	var force bool
@@ -386,13 +426,9 @@ func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *
 		Short: "Create a library from Claude MCP configuration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			source := from
-			if source == "" {
-				var err error
-				source, err = claudecfg.DefaultPath()
-				if err != nil {
-					return err
-				}
+			source, err := resolveSourcePath(from)
+			if err != nil {
+				return err
 			}
 			groups, err := claudecfg.Load(source, opts.root)
 			if err != nil {
@@ -409,29 +445,7 @@ func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *
 			if err != nil {
 				return err
 			}
-			client := library.GitClient{}
-			if err := client.InitLocal(ctx, lib, force); err != nil {
-				return err
-			}
-			approved, err := approveClaudeMCPs(cmd, groups)
-			if err != nil {
-				return err
-			}
-			for _, mcp := range approved {
-				if _, err := library.WriteDefinition(lib, mcp.Definition); err != nil {
-					return err
-				}
-				if err := printf(cmd, "imported %s\n", mcp.Name); err != nil {
-					return err
-				}
-			}
-			if _, err := client.Reindex(lib); err != nil {
-				return err
-			}
-			if err := client.CommitAll(ctx, lib.CachePath, "Initial import from ~/.claude.json"); err != nil {
-				return err
-			}
-			if err := saveConfig(opts.configPath, cfg); err != nil {
+			if err := runClaudeMigration(ctx, cmd, opts, lib, force, groups, cfg); err != nil {
 				return err
 			}
 			return printf(cmd, "registered %s at %s\n", lib.Name, lib.CachePath)
