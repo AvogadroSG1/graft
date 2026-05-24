@@ -149,60 +149,29 @@ func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 		Short: "Initialize graft in a project",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store := lock.FileStore{}
-			lockPath := filepath.Join(opts.root, "graft.lock")
-			lockExists := false
-			if _, statErr := os.Stat(lockPath); statErr == nil {
-				lockExists = true
-			} else if !os.IsNotExist(statErr) {
-				return fmt.Errorf("stat graft.lock: %w", statErr)
+			if err := checkInitLock(opts.root, yes); err != nil {
+				return err
 			}
-			if lockExists && !yes {
-				return fmt.Errorf("graft.lock exists; pass --yes to reinitialize")
-			}
-			if _, err := store.Load(opts.root); err != nil {
+			if _, err := (lock.FileStore{}).Load(opts.root); err != nil {
 				return err
 			}
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			if libraryName == "" {
-				if lib, ok := cfg.DefaultLibrary(); ok {
-					libraryName = lib.Name
-				}
-			}
-			lk := lock.Lock{Libraries: []lock.LibraryRef{}, MCPs: []lock.InstalledMCP{}}
-			if libraryName != "" {
-				lib, ok := cfg.Library(libraryName)
-				if !ok {
-					return fmt.Errorf("library %q is not registered with graft CLI", libraryName)
-				}
-				lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
-			}
-			targetNames := parseTargets(targets)
-			stagePaths := []string{"graft.lock"}
-			for _, target := range targetNames {
-				path, created, err := createTarget(opts.root, target)
-				if err != nil {
-					return err
-				}
-				if created {
-					stagePaths = append(stagePaths, path)
-				}
-			}
-			if err := store.Save(opts.root, lk); err != nil {
+			lk, err := buildInitLock(cfg, libraryName)
+			if err != nil {
 				return err
 			}
-			if len(lk.Libraries) > 0 {
-				pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
-				pickCmd.SetArgs([]string{"--targets", targets})
-				pickCmd.SetIn(cmd.InOrStdin())
-				pickCmd.SetOut(cmd.OutOrStdout())
-				pickCmd.SetErr(cmd.ErrOrStderr())
-				if err := pickCmd.Execute(); err != nil {
-					return err
-				}
+			stagePaths, err := createInitTargets(opts.root, parseTargets(targets))
+			if err != nil {
+				return err
+			}
+			if err := (lock.FileStore{}).Save(opts.root, lk); err != nil {
+				return err
+			}
+			if err := runPickAfterInit(ctx, cmd, opts, lk, targets, client, runner); err != nil {
+				return err
 			}
 			if err := stageInitFiles(opts.root, stagePaths); err != nil {
 				return err
