@@ -530,35 +530,45 @@ func prepareLocalLibraryConfig(cfg config.Config, name string) (config.Config, c
 	return next, lib, nil
 }
 
+func approveMCPsFromGroup(cmd *cobra.Command, reader *bufio.Reader, group claudecfg.Group, seen map[string]string) ([]claudecfg.MCP, error) {
+	approved := []claudecfg.MCP{}
+	approveAll := group.Scope == claudecfg.ScopeGlobal
+	for _, mcp := range group.MCPs {
+		if prior, ok := seen[mcp.Name]; ok {
+			if err := eprintf(cmd, "warning: skipping duplicate MCP %s from %s; already imported from %s\n", mcp.Name, group.Name, prior); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !approveAll {
+			choice, err := promptApproval(cmd, reader, group.Name, mcp.Name)
+			if err != nil {
+				return nil, err
+			}
+			switch choice {
+			case "a":
+				approveAll = true
+			case "y":
+			default:
+				continue
+			}
+		}
+		approved = append(approved, mcp)
+		seen[mcp.Name] = group.Name
+	}
+	return approved, nil
+}
+
 func approveClaudeMCPs(cmd *cobra.Command, groups []claudecfg.Group) ([]claudecfg.MCP, error) {
 	approved := []claudecfg.MCP{}
 	seen := map[string]string{}
 	reader := bufio.NewReader(cmd.InOrStdin())
 	for _, group := range groups {
-		approveAll := group.Scope == claudecfg.ScopeGlobal
-		for _, mcp := range group.MCPs {
-			if prior, ok := seen[mcp.Name]; ok {
-				if err := eprintf(cmd, "warning: skipping duplicate MCP %s from %s; already imported from %s\n", mcp.Name, group.Name, prior); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if !approveAll {
-				choice, err := promptApproval(cmd, reader, group.Name, mcp.Name)
-				if err != nil {
-					return nil, err
-				}
-				switch choice {
-				case "a":
-					approveAll = true
-				case "y":
-				default:
-					continue
-				}
-			}
-			approved = append(approved, mcp)
-			seen[mcp.Name] = group.Name
+		groupApproved, err := approveMCPsFromGroup(cmd, reader, group, seen)
+		if err != nil {
+			return nil, err
 		}
+		approved = append(approved, groupApproved...)
 	}
 	return approved, nil
 }
