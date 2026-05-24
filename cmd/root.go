@@ -653,12 +653,7 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 	return cmd
 }
 
-func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
-	if _, err := library.WriteDefinition(lib, def); err == nil {
-		return true, nil
-	} else if !strings.Contains(err.Error(), "already exists") {
-		return false, err
-	}
+func resolveDefinitionConflict(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
 	for {
 		choice, err := promptLine(cmd, reader, fmt.Sprintf("MCP %s exists; choose keep/use-new/editor/skip: ", def.Name))
 		if err != nil {
@@ -681,6 +676,15 @@ func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib confi
 			return false, printf(cmd, "skipped %s\n", def.Name)
 		}
 	}
+}
+
+func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
+	if _, err := library.WriteDefinition(lib, def); err == nil {
+		return true, nil
+	} else if !strings.Contains(err.Error(), "already exists") {
+		return false, err
+	}
+	return resolveDefinitionConflict(cmd, reader, lib, def)
 }
 
 func editDefinitionCandidate(cmd *cobra.Command, def model.Definition) (model.Definition, error) {
