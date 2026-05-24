@@ -24,4 +24,5 @@ fi
 # --- END BEADS INTEGRATION v1.0.3 ---
 
 # CALM pre-commit hook (sidecar)
-"/Users/poconnor/peter_code/graft/.beads/hooks/calm-pre-commit"
+_bd_hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+sh "$_bd_hook_dir/calm-pre-commit" "$@"
