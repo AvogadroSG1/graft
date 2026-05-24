@@ -1435,6 +1435,43 @@ func newPickCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newPickCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
 }
 
+func loadPickDeps(ctx context.Context, cmd *cobra.Command, opts *appOptions, targets string, client library.Client) (string, config.Config, lock.Lock, error) {
+	target, err := normalizePickTarget(targets)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	cfg, err := loadConfig(opts.configPath)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	lk, err := (lock.FileStore{}).Load(opts.root)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	return target, cfg, lk, nil
+}
+
+func buildPickPreSelections(lk lock.Lock) []string {
+	preSelected := []string{}
+	for _, mcp := range lk.MCPs {
+		preSelected = append(preSelected, mcp.Library+"/"+mcp.Name)
+	}
+	return preSelected
+}
+
+func printPickWarnings(cmd *cobra.Command, warnings []string) error {
+	for _, warning := range warnings {
+		if err := eprintf(cmd, "warning: %s\n", warning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
 	var targets string
 	cmd := &cobra.Command{
@@ -1442,19 +1479,7 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 		Short: "Select MCPs from registered libraries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := normalizePickTarget(targets)
-			if err != nil {
-				return err
-			}
-			cfg, err := loadConfig(opts.configPath)
-			if err != nil {
-				return err
-			}
-			lk, err := (lock.FileStore{}).Load(opts.root)
-			if err != nil {
-				return err
-			}
-			cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
+			target, cfg, lk, err := loadPickDeps(ctx, cmd, opts, targets, client)
 			if err != nil {
 				return err
 			}
@@ -1466,16 +1491,10 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			for _, warning := range pickList.Warnings {
-				if err := eprintf(cmd, "warning: %s\n", warning); err != nil {
-					return err
-				}
+			if err := printPickWarnings(cmd, pickList.Warnings); err != nil {
+				return err
 			}
-			preSelected := []string{}
-			for _, mcp := range lk.MCPs {
-				preSelected = append(preSelected, mcp.Library+"/"+mcp.Name)
-			}
-			model, err := runner(ctx, tui.NewPickModel(pickList.Items, preSelected))
+			model, err := runner(ctx, tui.NewPickModel(pickList.Items, buildPickPreSelections(lk)))
 			if err != nil {
 				return err
 			}
