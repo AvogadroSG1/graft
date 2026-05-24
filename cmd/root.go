@@ -775,6 +775,24 @@ func runEditor(cmd *cobra.Command, path string) error {
 	return nil
 }
 
+type promptField struct {
+	value *string
+	label string
+}
+
+func promptMissingMCPFields(cmd *cobra.Command, reader *bufio.Reader, fields []promptField) error {
+	for _, f := range fields {
+		if *f.value == "" {
+			val, err := promptLine(cmd, reader, f.label)
+			if err != nil {
+				return err
+			}
+			*f.value = val
+		}
+	}
+	return nil
+}
+
 func newMCPAddCommand(opts *appOptions) *cobra.Command {
 	var command string
 	var description string
@@ -797,41 +815,16 @@ func newMCPAddCommand(opts *appOptions) *cobra.Command {
 			}
 			if !mcpAddFlagChanged(cmd) {
 				reader := bufio.NewReader(cmd.InOrStdin())
-				if description == "" {
-					description, err = promptLine(cmd, reader, "Description: ")
-					if err != nil {
-						return err
-					}
+				fields := []promptField{
+					{&description, "Description: "},
+					{&version, "Version [0.1.0]: "},
+					{&transportType, "Type [stdio/http/sse]: "},
+					{&command, "Command: "},
+					{&argsText, "Args: "},
+					{&tagsText, "Tags: "},
 				}
-				if version == "" {
-					version, err = promptLine(cmd, reader, "Version [0.1.0]: ")
-					if err != nil {
-						return err
-					}
-				}
-				if transportType == "" {
-					transportType, err = promptLine(cmd, reader, "Type [stdio/http/sse]: ")
-					if err != nil {
-						return err
-					}
-				}
-				if command == "" {
-					command, err = promptLine(cmd, reader, "Command: ")
-					if err != nil {
-						return err
-					}
-				}
-				if argsText == "" {
-					argsText, err = promptLine(cmd, reader, "Args: ")
-					if err != nil {
-						return err
-					}
-				}
-				if tagsText == "" {
-					tagsText, err = promptLine(cmd, reader, "Tags: ")
-					if err != nil {
-						return err
-					}
+				if err := promptMissingMCPFields(cmd, reader, fields); err != nil {
+					return err
 				}
 			}
 			if version == "" {
