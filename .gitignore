@@ -3,3 +3,5 @@ bin/
 coverage.out
 .DS_Store
 .claude/backups/
+# instill — managed symlinks, do not commit
+.claude/skills/

@@ -2,6 +2,12 @@
 
 This file provides instructions and context for AI coding agents working on this project.
 
+## Boy Scout Rule
+
+We MUST always leave our code in a better operational place than we started.
+
+If the system is failing checks, even if we weren't the ones to cause it, we MUST fix things to make them better for the next person.
+
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
 
