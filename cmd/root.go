@@ -80,6 +80,62 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	return root
 }
 
+func checkInitLock(root string, yes bool) error {
+	lockPath := filepath.Join(root, "graft.lock")
+	_, statErr := os.Stat(lockPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat graft.lock: %w", statErr)
+	}
+	if statErr == nil && !yes {
+		return fmt.Errorf("graft.lock exists; pass --yes to reinitialize")
+	}
+	return nil
+}
+
+func buildInitLock(cfg config.Config, libraryName string) (lock.Lock, error) {
+	if libraryName == "" {
+		if lib, ok := cfg.DefaultLibrary(); ok {
+			libraryName = lib.Name
+		}
+	}
+	lk := lock.Lock{Libraries: []lock.LibraryRef{}, MCPs: []lock.InstalledMCP{}}
+	if libraryName == "" {
+		return lk, nil
+	}
+	lib, ok := cfg.Library(libraryName)
+	if !ok {
+		return lk, fmt.Errorf("library %q is not registered with graft CLI", libraryName)
+	}
+	lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
+	return lk, nil
+}
+
+func createInitTargets(root string, targetNames []string) ([]string, error) {
+	stagePaths := []string{"graft.lock"}
+	for _, target := range targetNames {
+		path, created, err := createTarget(root, target)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			stagePaths = append(stagePaths, path)
+		}
+	}
+	return stagePaths, nil
+}
+
+func runPickAfterInit(ctx context.Context, cmd *cobra.Command, opts *appOptions, lk lock.Lock, targets string, client library.Client, runner pickRunner) error {
+	if len(lk.Libraries) == 0 {
+		return nil
+	}
+	pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
+	pickCmd.SetArgs([]string{"--targets", targets})
+	pickCmd.SetIn(cmd.InOrStdin())
+	pickCmd.SetOut(cmd.OutOrStdout())
+	pickCmd.SetErr(cmd.ErrOrStderr())
+	return pickCmd.Execute()
+}
+
 func newInitCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newInitCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
 }
@@ -120,7 +176,7 @@ func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if libraryName != "" {
 				lib, ok := cfg.Library(libraryName)
 				if !ok {
-					return fmt.Errorf("library %q is not registered", libraryName)
+					return fmt.Errorf("library %q is not registered with graft CLI", libraryName)
 				}
 				lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
 			}
