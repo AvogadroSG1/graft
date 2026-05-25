@@ -21,7 +21,11 @@ fmt:
 	gofmt -w .
 
 build:
-	go build -o bin/graft .
+	go build $(GOFLAGS) -o $(BINARY) .
+
+install:
+	mkdir -p $(PREFIX)/bin
+	go build $(GOFLAGS) -o $(PREFIX)/bin/$(BINARY) .
 
 install:
 	mkdir -p $(PREFIX)/bin

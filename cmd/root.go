@@ -80,6 +80,62 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	return root
 }
 
+func checkInitLock(root string, yes bool) error {
+	lockPath := filepath.Join(root, "graft.lock")
+	_, statErr := os.Stat(lockPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat graft.lock: %w", statErr)
+	}
+	if statErr == nil && !yes {
+		return fmt.Errorf("graft.lock exists; pass --yes to reinitialize")
+	}
+	return nil
+}
+
+func buildInitLock(cfg config.Config, libraryName string) (lock.Lock, error) {
+	if libraryName == "" {
+		if lib, ok := cfg.DefaultLibrary(); ok {
+			libraryName = lib.Name
+		}
+	}
+	lk := lock.Lock{Libraries: []lock.LibraryRef{}, MCPs: []lock.InstalledMCP{}}
+	if libraryName == "" {
+		return lk, nil
+	}
+	lib, ok := cfg.Library(libraryName)
+	if !ok {
+		return lk, fmt.Errorf("library %q is not registered with graft CLI", libraryName)
+	}
+	lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
+	return lk, nil
+}
+
+func createInitTargets(root string, targetNames []string) ([]string, error) {
+	stagePaths := []string{"graft.lock"}
+	for _, target := range targetNames {
+		path, created, err := createTarget(root, target)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			stagePaths = append(stagePaths, path)
+		}
+	}
+	return stagePaths, nil
+}
+
+func runPickAfterInit(ctx context.Context, cmd *cobra.Command, opts *appOptions, lk lock.Lock, targets string, client library.Client, runner pickRunner) error {
+	if len(lk.Libraries) == 0 {
+		return nil
+	}
+	pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
+	pickCmd.SetArgs([]string{"--targets", targets})
+	pickCmd.SetIn(cmd.InOrStdin())
+	pickCmd.SetOut(cmd.OutOrStdout())
+	pickCmd.SetErr(cmd.ErrOrStderr())
+	return pickCmd.Execute()
+}
+
 func newInitCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newInitCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
 }
@@ -93,60 +149,29 @@ func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 		Short: "Initialize graft in a project",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store := lock.FileStore{}
-			lockPath := filepath.Join(opts.root, "graft.lock")
-			lockExists := false
-			if _, statErr := os.Stat(lockPath); statErr == nil {
-				lockExists = true
-			} else if !os.IsNotExist(statErr) {
-				return fmt.Errorf("stat graft.lock: %w", statErr)
+			if err := checkInitLock(opts.root, yes); err != nil {
+				return err
 			}
-			if lockExists && !yes {
-				return fmt.Errorf("graft.lock exists; pass --yes to reinitialize")
-			}
-			if _, err := store.Load(opts.root); err != nil {
+			if _, err := (lock.FileStore{}).Load(opts.root); err != nil {
 				return err
 			}
 			cfg, err := loadConfig(opts.configPath)
 			if err != nil {
 				return err
 			}
-			if libraryName == "" {
-				if lib, ok := cfg.DefaultLibrary(); ok {
-					libraryName = lib.Name
-				}
-			}
-			lk := lock.Lock{Libraries: []lock.LibraryRef{}, MCPs: []lock.InstalledMCP{}}
-			if libraryName != "" {
-				lib, ok := cfg.Library(libraryName)
-				if !ok {
-					return fmt.Errorf("library %q is not registered", libraryName)
-				}
-				lk.Libraries = append(lk.Libraries, lock.LibraryRef{Name: lib.Name, URL: lib.URL})
-			}
-			targetNames := parseTargets(targets)
-			stagePaths := []string{"graft.lock"}
-			for _, target := range targetNames {
-				path, created, err := createTarget(opts.root, target)
-				if err != nil {
-					return err
-				}
-				if created {
-					stagePaths = append(stagePaths, path)
-				}
-			}
-			if err := store.Save(opts.root, lk); err != nil {
+			lk, err := buildInitLock(cfg, libraryName)
+			if err != nil {
 				return err
 			}
-			if len(lk.Libraries) > 0 {
-				pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
-				pickCmd.SetArgs([]string{"--targets", targets})
-				pickCmd.SetIn(cmd.InOrStdin())
-				pickCmd.SetOut(cmd.OutOrStdout())
-				pickCmd.SetErr(cmd.ErrOrStderr())
-				if err := pickCmd.Execute(); err != nil {
-					return err
-				}
+			stagePaths, err := createInitTargets(opts.root, parseTargets(targets))
+			if err != nil {
+				return err
+			}
+			if err := (lock.FileStore{}).Save(opts.root, lk); err != nil {
+				return err
+			}
+			if err := runPickAfterInit(ctx, cmd, opts, lk, targets, client, runner); err != nil {
+				return err
 			}
 			if err := stageInitFiles(opts.root, stagePaths); err != nil {
 				return err
@@ -352,6 +377,46 @@ func filterLibraryIndex(index model.LibraryIndex, tag string) model.LibraryIndex
 	return filtered
 }
 
+func resolveSourcePath(from string) (string, error) {
+	if from != "" {
+		return from, nil
+	}
+	return claudecfg.DefaultPath()
+}
+
+func writeApprovedMCPs(cmd *cobra.Command, lib config.Library, mcps []claudecfg.MCP) error {
+	for _, mcp := range mcps {
+		if _, err := library.WriteDefinition(lib, mcp.Definition); err != nil {
+			return err
+		}
+		if err := printf(cmd, "imported %s\n", mcp.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func runClaudeMigration(ctx context.Context, cmd *cobra.Command, opts *appOptions, lib config.Library, force bool, groups []claudecfg.Group, cfg config.Config) error {
+	client := library.GitClient{}
+	if err := client.InitLocal(ctx, lib, force); err != nil {
+		return err
+	}
+	approved, err := approveClaudeMCPs(cmd, groups)
+	if err != nil {
+		return err
+	}
+	if err := writeApprovedMCPs(cmd, lib, approved); err != nil {
+		return err
+	}
+	if _, err := client.Reindex(lib); err != nil {
+		return err
+	}
+	if err := client.CommitAll(ctx, lib.CachePath, "Initial import from ~/.claude.json"); err != nil {
+		return err
+	}
+	return saveConfig(opts.configPath, cfg)
+}
+
 func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	var from string
 	var force bool
@@ -361,13 +426,9 @@ func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *
 		Short: "Create a library from Claude MCP configuration",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			source := from
-			if source == "" {
-				var err error
-				source, err = claudecfg.DefaultPath()
-				if err != nil {
-					return err
-				}
+			source, err := resolveSourcePath(from)
+			if err != nil {
+				return err
 			}
 			groups, err := claudecfg.Load(source, opts.root)
 			if err != nil {
@@ -384,29 +445,7 @@ func newLibraryMigrateFromClaudeCommand(ctx context.Context, opts *appOptions) *
 			if err != nil {
 				return err
 			}
-			client := library.GitClient{}
-			if err := client.InitLocal(ctx, lib, force); err != nil {
-				return err
-			}
-			approved, err := approveClaudeMCPs(cmd, groups)
-			if err != nil {
-				return err
-			}
-			for _, mcp := range approved {
-				if _, err := library.WriteDefinition(lib, mcp.Definition); err != nil {
-					return err
-				}
-				if err := printf(cmd, "imported %s\n", mcp.Name); err != nil {
-					return err
-				}
-			}
-			if _, err := client.Reindex(lib); err != nil {
-				return err
-			}
-			if err := client.CommitAll(ctx, lib.CachePath, "Initial import from ~/.claude.json"); err != nil {
-				return err
-			}
-			if err := saveConfig(opts.configPath, cfg); err != nil {
+			if err := runClaudeMigration(ctx, cmd, opts, lib, force, groups, cfg); err != nil {
 				return err
 			}
 			return printf(cmd, "registered %s at %s\n", lib.Name, lib.CachePath)
@@ -433,27 +472,44 @@ func printClaudeMigrationDryRun(cmd *cobra.Command, groups []claudecfg.Group) er
 	return nil
 }
 
+func ensureLibraryCachePath(cfg config.Config, lib config.Library) (config.Config, config.Library, error) {
+	if lib.CachePath != "" {
+		return cfg, lib, nil
+	}
+	next, err := cfg.WithLibrary(lib)
+	if err != nil {
+		return cfg, lib, err
+	}
+	updated, _ := next.Library(lib.Name)
+	return next, updated, nil
+}
+
+func ensureLibraryURL(cfg config.Config, lib config.Library) (config.Config, config.Library, error) {
+	if lib.URL != "" {
+		return cfg, lib, nil
+	}
+	lib.URL = lib.CachePath
+	next, err := cfg.WithLibrary(lib)
+	if err != nil {
+		return cfg, lib, err
+	}
+	updated, _ := next.Library(lib.Name)
+	return next, updated, nil
+}
+
 func prepareLocalLibraryConfig(cfg config.Config, name string) (config.Config, config.Library, error) {
 	if err := library.ValidateMCPName(name); err != nil {
 		return cfg, config.Library{}, err
 	}
 	if existing, ok := cfg.Library(name); ok {
-		if existing.CachePath == "" {
-			next, err := cfg.WithLibrary(existing)
-			if err != nil {
-				return cfg, config.Library{}, err
-			}
-			existing, _ = next.Library(name)
-			cfg = next
+		var err error
+		cfg, existing, err = ensureLibraryCachePath(cfg, existing)
+		if err != nil {
+			return cfg, config.Library{}, err
 		}
-		if existing.URL == "" {
-			existing.URL = existing.CachePath
-			next, err := cfg.WithLibrary(existing)
-			if err != nil {
-				return cfg, config.Library{}, err
-			}
-			existing, _ = next.Library(name)
-			cfg = next
+		cfg, existing, err = ensureLibraryURL(cfg, existing)
+		if err != nil {
+			return cfg, config.Library{}, err
 		}
 		return cfg, existing, nil
 	}
@@ -474,35 +530,45 @@ func prepareLocalLibraryConfig(cfg config.Config, name string) (config.Config, c
 	return next, lib, nil
 }
 
+func approveMCPsFromGroup(cmd *cobra.Command, reader *bufio.Reader, group claudecfg.Group, seen map[string]string) ([]claudecfg.MCP, error) {
+	approved := []claudecfg.MCP{}
+	approveAll := group.Scope == claudecfg.ScopeGlobal
+	for _, mcp := range group.MCPs {
+		if prior, ok := seen[mcp.Name]; ok {
+			if err := eprintf(cmd, "warning: skipping duplicate MCP %s from %s; already imported from %s\n", mcp.Name, group.Name, prior); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if !approveAll {
+			choice, err := promptApproval(cmd, reader, group.Name, mcp.Name)
+			if err != nil {
+				return nil, err
+			}
+			switch choice {
+			case "a":
+				approveAll = true
+			case "y":
+			default:
+				continue
+			}
+		}
+		approved = append(approved, mcp)
+		seen[mcp.Name] = group.Name
+	}
+	return approved, nil
+}
+
 func approveClaudeMCPs(cmd *cobra.Command, groups []claudecfg.Group) ([]claudecfg.MCP, error) {
 	approved := []claudecfg.MCP{}
 	seen := map[string]string{}
 	reader := bufio.NewReader(cmd.InOrStdin())
 	for _, group := range groups {
-		approveAll := group.Scope == claudecfg.ScopeGlobal
-		for _, mcp := range group.MCPs {
-			if prior, ok := seen[mcp.Name]; ok {
-				if err := eprintf(cmd, "warning: skipping duplicate MCP %s from %s; already imported from %s\n", mcp.Name, group.Name, prior); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if !approveAll {
-				choice, err := promptApproval(cmd, reader, group.Name, mcp.Name)
-				if err != nil {
-					return nil, err
-				}
-				switch choice {
-				case "a":
-					approveAll = true
-				case "y":
-				default:
-					continue
-				}
-			}
-			approved = append(approved, mcp)
-			seen[mcp.Name] = group.Name
+		groupApproved, err := approveMCPsFromGroup(cmd, reader, group, seen)
+		if err != nil {
+			return nil, err
 		}
+		approved = append(approved, groupApproved...)
 	}
 	return approved, nil
 }
@@ -532,6 +598,19 @@ func newMCPCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return cmd
 }
 
+func importDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
+	if hasAuthFields(def) {
+		answer, err := promptLine(cmd, reader, fmt.Sprintf("Import auth placeholders for %s? [y/N] ", def.Name))
+		if err != nil {
+			return false, err
+		}
+		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			return false, printf(cmd, "skipped %s\n", def.Name)
+		}
+	}
+	return writeImportedDefinition(cmd, reader, lib, def)
+}
+
 func newMCPImportCommand(opts *appOptions) *cobra.Command {
 	var from string
 	cmd := &cobra.Command{
@@ -556,19 +635,7 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 			}
 			reader := bufio.NewReader(cmd.InOrStdin())
 			for _, def := range defs {
-				if hasAuthFields(def) {
-					answer, err := promptLine(cmd, reader, fmt.Sprintf("Import auth placeholders for %s? [y/N] ", def.Name))
-					if err != nil {
-						return err
-					}
-					if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-						if err := printf(cmd, "skipped %s\n", def.Name); err != nil {
-							return err
-						}
-						continue
-					}
-				}
-				written, err := writeImportedDefinition(cmd, reader, lib, def)
+				written, err := importDefinition(cmd, reader, lib, def)
 				if err != nil {
 					return err
 				}
@@ -586,12 +653,7 @@ func newMCPImportCommand(opts *appOptions) *cobra.Command {
 	return cmd
 }
 
-func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
-	if _, err := library.WriteDefinition(lib, def); err == nil {
-		return true, nil
-	} else if !strings.Contains(err.Error(), "already exists") {
-		return false, err
-	}
+func resolveDefinitionConflict(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
 	for {
 		choice, err := promptLine(cmd, reader, fmt.Sprintf("MCP %s exists; choose keep/use-new/editor/skip: ", def.Name))
 		if err != nil {
@@ -614,6 +676,15 @@ func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib confi
 			return false, printf(cmd, "skipped %s\n", def.Name)
 		}
 	}
+}
+
+func writeImportedDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {
+	if _, err := library.WriteDefinition(lib, def); err == nil {
+		return true, nil
+	} else if !strings.Contains(err.Error(), "already exists") {
+		return false, err
+	}
+	return resolveDefinitionConflict(cmd, reader, lib, def)
 }
 
 func editDefinitionCandidate(cmd *cobra.Command, def model.Definition) (model.Definition, error) {
@@ -704,6 +775,24 @@ func runEditor(cmd *cobra.Command, path string) error {
 	return nil
 }
 
+type promptField struct {
+	value *string
+	label string
+}
+
+func promptMissingMCPFields(cmd *cobra.Command, reader *bufio.Reader, fields []promptField) error {
+	for _, f := range fields {
+		if *f.value == "" {
+			val, err := promptLine(cmd, reader, f.label)
+			if err != nil {
+				return err
+			}
+			*f.value = val
+		}
+	}
+	return nil
+}
+
 func newMCPAddCommand(opts *appOptions) *cobra.Command {
 	var command string
 	var description string
@@ -726,41 +815,16 @@ func newMCPAddCommand(opts *appOptions) *cobra.Command {
 			}
 			if !mcpAddFlagChanged(cmd) {
 				reader := bufio.NewReader(cmd.InOrStdin())
-				if description == "" {
-					description, err = promptLine(cmd, reader, "Description: ")
-					if err != nil {
-						return err
-					}
+				fields := []promptField{
+					{&description, "Description: "},
+					{&version, "Version [0.1.0]: "},
+					{&transportType, "Type [stdio/http/sse]: "},
+					{&command, "Command: "},
+					{&argsText, "Args: "},
+					{&tagsText, "Tags: "},
 				}
-				if version == "" {
-					version, err = promptLine(cmd, reader, "Version [0.1.0]: ")
-					if err != nil {
-						return err
-					}
-				}
-				if transportType == "" {
-					transportType, err = promptLine(cmd, reader, "Type [stdio/http/sse]: ")
-					if err != nil {
-						return err
-					}
-				}
-				if command == "" {
-					command, err = promptLine(cmd, reader, "Command: ")
-					if err != nil {
-						return err
-					}
-				}
-				if argsText == "" {
-					argsText, err = promptLine(cmd, reader, "Args: ")
-					if err != nil {
-						return err
-					}
-				}
-				if tagsText == "" {
-					tagsText, err = promptLine(cmd, reader, "Tags: ")
-					if err != nil {
-						return err
-					}
+				if err := promptMissingMCPFields(cmd, reader, fields); err != nil {
+					return err
 				}
 			}
 			if version == "" {
@@ -924,6 +988,44 @@ func newStatusCommandWithDeps(opts *appOptions, client library.Client) *cobra.Co
 	return cmd
 }
 
+func pullSyncLibraries(ctx context.Context, client library.Client, libs []config.Library, noPull bool) error {
+	if noPull {
+		return nil
+	}
+	for _, lib := range libs {
+		if _, err := client.Pull(ctx, lib); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func buildActiveSyncAdapters(root string, override []render.AdapterByName) []render.AdapterByName {
+	if override != nil {
+		return override
+	}
+	return []render.AdapterByName{
+		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
+		{Name: "codex", Adapter: render.NewCodexAdapter(root)},
+	}
+}
+
+func buildPinMismatchConfirmer(cmd *cobra.Command) func(string) (string, error) {
+	return func(diff string) (string, error) {
+		if err := eprintf(cmd, "SECURITY WARNING: pin mismatch detected.\n%s\nType 'I understand the risk' to continue: ", diff); err != nil {
+			return "", err
+		}
+		answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
+		if err != nil {
+			return "", err
+		}
+		if !hasInput {
+			return "", fmt.Errorf("SECURITY WARNING: forced pin mismatch requires confirmation phrase")
+		}
+		return answer, nil
+	}
+}
+
 func newSyncCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newSyncCommandWithDeps(ctx, opts, library.GitClient{}, nil)
 }
@@ -952,12 +1054,8 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			if !noPull {
-				for _, lib := range pullLibraries {
-					if _, err := client.Pull(ctx, lib); err != nil {
-						return err
-					}
-				}
+			if err := pullSyncLibraries(ctx, client, pullLibraries, noPull); err != nil {
+				return err
 			}
 			if len(lk.MCPs) == 0 {
 				return writeValue(cmd, true, graftsync.Result{
@@ -969,32 +1067,11 @@ func newSyncCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 					Lock:      lk,
 				})
 			}
-			activeAdapters := adapters
-			if activeAdapters == nil {
-				activeAdapters = []render.AdapterByName{
-					{Name: "claude", Adapter: render.NewClaudeAdapter(opts.root)},
-					{Name: "codex", Adapter: render.NewCodexAdapter(opts.root)},
-				}
-			}
-			result := graftsync.ApplyWithOptions(
-				lk,
-				cfg,
-				client,
-				activeAdapters,
-				graftsync.Options{Names: args, ForcePins: forcePins, ConfirmPinMismatch: func(diff string) (string, error) {
-					if err := eprintf(cmd, "SECURITY WARNING: pin mismatch detected.\n%s\nType 'I understand the risk' to continue: ", diff); err != nil {
-						return "", err
-					}
-					answer, hasInput, err := readPromptAnswer(cmd.InOrStdin())
-					if err != nil {
-						return "", err
-					}
-					if !hasInput {
-						return "", fmt.Errorf("SECURITY WARNING: forced pin mismatch requires confirmation phrase")
-					}
-					return answer, nil
-				}},
-			)
+			result := graftsync.ApplyWithOptions(lk, cfg, client, buildActiveSyncAdapters(opts.root, adapters), graftsync.Options{
+				Names:              args,
+				ForcePins:          forcePins,
+				ConfirmPinMismatch: buildPinMismatchConfirmer(cmd),
+			})
 			if err := (lock.FileStore{}).Save(opts.root, result.Lock); err != nil {
 				return err
 			}
@@ -1358,6 +1435,43 @@ func newPickCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	return newPickCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
 }
 
+func loadPickDeps(ctx context.Context, cmd *cobra.Command, opts *appOptions, targets string, client library.Client) (string, config.Config, lock.Lock, error) {
+	target, err := normalizePickTarget(targets)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	cfg, err := loadConfig(opts.configPath)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	lk, err := (lock.FileStore{}).Load(opts.root)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
+	if err != nil {
+		return "", config.Config{}, lock.Lock{}, err
+	}
+	return target, cfg, lk, nil
+}
+
+func buildPickPreSelections(lk lock.Lock) []string {
+	preSelected := []string{}
+	for _, mcp := range lk.MCPs {
+		preSelected = append(preSelected, mcp.Library+"/"+mcp.Name)
+	}
+	return preSelected
+}
+
+func printPickWarnings(cmd *cobra.Command, warnings []string) error {
+	for _, warning := range warnings {
+		if err := eprintf(cmd, "warning: %s\n", warning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
 	var targets string
 	cmd := &cobra.Command{
@@ -1365,19 +1479,7 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 		Short: "Select MCPs from registered libraries",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, err := normalizePickTarget(targets)
-			if err != nil {
-				return err
-			}
-			cfg, err := loadConfig(opts.configPath)
-			if err != nil {
-				return err
-			}
-			lk, err := (lock.FileStore{}).Load(opts.root)
-			if err != nil {
-				return err
-			}
-			cfg, err = ensureLockLibrariesRegistered(ctx, cmd, opts, cfg, lk, client)
+			target, cfg, lk, err := loadPickDeps(ctx, cmd, opts, targets, client)
 			if err != nil {
 				return err
 			}
@@ -1389,16 +1491,10 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			for _, warning := range pickList.Warnings {
-				if err := eprintf(cmd, "warning: %s\n", warning); err != nil {
-					return err
-				}
+			if err := printPickWarnings(cmd, pickList.Warnings); err != nil {
+				return err
 			}
-			preSelected := []string{}
-			for _, mcp := range lk.MCPs {
-				preSelected = append(preSelected, mcp.Library+"/"+mcp.Name)
-			}
-			model, err := runner(ctx, tui.NewPickModel(pickList.Items, preSelected))
+			model, err := runner(ctx, tui.NewPickModel(pickList.Items, buildPickPreSelections(lk)))
 			if err != nil {
 				return err
 			}
@@ -1468,6 +1564,26 @@ func lockWithConfiguredLibraries(lk lock.Lock, cfg config.Config) lock.Lock {
 	return next
 }
 
+func buildMCPMap(mcps []lock.InstalledMCP) map[string]lock.InstalledMCP {
+	m := map[string]lock.InstalledMCP{}
+	for _, mcp := range mcps {
+		m[pickLockKey(mcp.Library, mcp.Name)] = mcp
+	}
+	return m
+}
+
+func removeStalePickTargets(adapters []render.AdapterByName, oldMCPs, nextMCPs map[string]lock.InstalledMCP) error {
+	for key, oldMCP := range oldMCPs {
+		nextMCP, ok := nextMCPs[key]
+		if !ok || oldMCP.Target != nextMCP.Target || oldMCP.DefinitionHash != nextMCP.DefinitionHash {
+			if err := removePickTargets(adapters, oldMCP); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func savePickResultWithSideEffects(root string, cfg config.Config, client library.Client, old lock.Lock, next lock.Lock) error {
 	adapters := []render.AdapterByName{
 		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
@@ -1477,21 +1593,8 @@ func savePickResultWithSideEffects(root string, cfg config.Config, client librar
 	if err != nil {
 		return err
 	}
-	oldMCPs := map[string]lock.InstalledMCP{}
-	for _, mcp := range old.MCPs {
-		oldMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
-	}
-	nextMCPs := map[string]lock.InstalledMCP{}
-	for _, mcp := range next.MCPs {
-		nextMCPs[pickLockKey(mcp.Library, mcp.Name)] = mcp
-	}
-	for key, oldMCP := range oldMCPs {
-		nextMCP, ok := nextMCPs[key]
-		if !ok || oldMCP.Target != nextMCP.Target || oldMCP.DefinitionHash != nextMCP.DefinitionHash {
-			if err := removePickTargets(adapters, oldMCP); err != nil {
-				return rollbackPickSideEffects(snapshots, err)
-			}
-		}
+	if err := removeStalePickTargets(adapters, buildMCPMap(old.MCPs), buildMCPMap(next.MCPs)); err != nil {
+		return rollbackPickSideEffects(snapshots, err)
 	}
 	resultLock := next
 	if syncNames := pickSyncNames(old, next); len(syncNames) > 0 {
