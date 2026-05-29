@@ -8,6 +8,13 @@
       ],
       "command": "npx"
     },
+    "markitdown": {
+      "_graft_managed": true,
+      "command": "uvx",
+      "args": [
+        "markitdown-mcp"
+      ]
+    },
     "serena": {
       "_graft_managed": true,
       "args": [
