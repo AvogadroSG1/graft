@@ -25,4 +25,4 @@ fi
 
 # CALM pre-commit hook (sidecar)
 _bd_hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-sh "$_bd_hook_dir/calm-pre-commit" "$@"
+bash "$_bd_hook_dir/calm-pre-commit" "$@"
