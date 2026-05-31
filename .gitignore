@@ -5,3 +5,5 @@ coverage.out
 .claude/backups/
 # instill — managed symlinks, do not commit
 .claude/skills/
+cmd/.claude/backups/
+.beads/hooks/__pycache__/
