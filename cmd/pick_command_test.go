@@ -18,6 +18,19 @@ import (
 	"go.uber.org/mock/gomock"
 )
 
+// acceptDefaultPlaceholders is a placeholderRunner test double that accepts the
+// default ${VAR} for every prompted token (presses enter for each).
+func acceptDefaultPlaceholders(_ context.Context, m tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+	for range m.Items {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		m = next.(tui.PlaceholderModel)
+	}
+	if len(m.Items) == 0 {
+		m.Confirmed = true
+	}
+	return m, nil
+}
+
 func TestPickCommandWritesConfirmedSelectionToLock(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -41,7 +54,7 @@ func TestPickCommandWritesConfirmedSelectionToLock(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	cmd.SetArgs([]string{"--targets", "codex"})
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -82,7 +95,7 @@ func TestPickCommandCancelLeavesLockUnchanged(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -110,7 +123,7 @@ func TestPickCommandPrintsDuplicateWarnings(t *testing.T) {
 		next, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 		return next.(tui.PickModel), nil
 	}
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	var errOut bytes.Buffer
 	cmd.SetErr(&errOut)
 
@@ -124,7 +137,7 @@ func TestPickCommandPrintsDuplicateWarnings(t *testing.T) {
 
 func TestPickCommandErrorsWhenNoLibrariesConfigured(t *testing.T) {
 	t.Parallel()
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: writePickConfig(t), root: t.TempDir()}, librarymock.NewMockClient(gomock.NewController(t)), nil)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: writePickConfig(t), root: t.TempDir()}, librarymock.NewMockClient(gomock.NewController(t)), nil, nil)
 
 	err := cmd.Execute()
 
@@ -155,7 +168,7 @@ func TestPickCommandDefaultTargetsApplyToEverySelectedMCP(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -196,7 +209,7 @@ func TestPickCommandRemovesUncheckedMCPs(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -240,7 +253,7 @@ func TestPickCommandConfirmedUnchangedSelectionDoesNotFetchDefinition(t *testing
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -276,7 +289,7 @@ func TestPickCommandRollsBackRenderedFilesOnLockSaveFailure(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("Execute() error = nil, want lock save failure")
@@ -313,7 +326,7 @@ func TestPickCommandRollsBackRenderedFilesOnSideEffectFailure(t *testing.T) {
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "definition failed") {
 		t.Fatalf("Execute() error = %v, want definition failure", err)
@@ -334,35 +347,99 @@ func TestPickCommandRollsBackRenderedFilesOnSideEffectFailure(t *testing.T) {
 	}
 }
 
-func TestPickCommandRejectsAuthSensitiveDefinitionWithoutRendering(t *testing.T) {
+// pickSelectFirst toggles and confirms the first MCP in the picker.
+func pickSelectFirst(_ context.Context, model tui.PickModel) (tui.PickModel, error) {
+	next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+	model = next.(tui.PickModel)
+	next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	return next.(tui.PickModel), nil
+}
+
+func TestPickCommandPromptsForPlaceholderAndRenders(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	lib := config.Library{Name: "core"}
 	cfgPath := writePickConfig(t, lib)
-	original := lock.Lock{Libraries: []lock.LibraryRef{{Name: "core"}}, MCPs: []lock.InstalledMCP{}}
-	writePickLock(t, root, original)
+	writePickLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core"}}, MCPs: []lock.InstalledMCP{}})
 	ctrl := gomock.NewController(t)
 	client := librarymock.NewMockClient(ctrl)
 	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", SHA256: "hash-docs"}}}, nil)
 	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, "hash-docs", nil)
-	runner := func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
-		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
-		model = next.(tui.PickModel)
-		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-		return next.(tui.PickModel), nil
+
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, pickSelectFirst, acceptDefaultPlaceholders)
+	cmd.SetArgs([]string{"--targets", "claude"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	got, loadErr := (lock.FileStore{}).Load(root)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if len(got.MCPs) != 1 || got.MCPs[0].Name != "docs" || got.MCPs[0].PendingInput {
+		t.Fatalf("lock = %+v, want docs installed without pending input", got)
+	}
+	data, readErr := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if readErr != nil || !strings.Contains(string(data), "${API_KEY}") {
+		t.Fatalf("claude config = %q, %v; want rendered ${API_KEY}", data, readErr)
+	}
+}
+
+func TestPickCommandRemapsPlaceholderToTypedName(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core"}
+	cfgPath := writePickConfig(t, lib)
+	writePickLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core"}}, MCPs: []lock.InstalledMCP{}})
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", SHA256: "hash-docs"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, "hash-docs", nil)
+	typeName := func(_ context.Context, m tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+		for _, r := range "MY_KEY" {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m = next.(tui.PlaceholderModel)
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(tui.PlaceholderModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
-	err := cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "auth warning") {
-		t.Fatalf("Execute() error = %v, want auth warning", err)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, pickSelectFirst, typeName)
+	cmd.SetArgs([]string{"--targets", "claude"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(root, ".mcp.json"))
+	if readErr != nil || !strings.Contains(string(data), "${MY_KEY}") {
+		t.Fatalf("claude config = %q, %v; want rendered ${MY_KEY}", data, readErr)
+	}
+}
+
+func TestPickCommandPlaceholderCancelLeavesProjectUnchanged(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := config.Library{Name: "core"}
+	cfgPath := writePickConfig(t, lib)
+	writePickLock(t, root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core"}}, MCPs: []lock.InstalledMCP{}})
+	ctrl := gomock.NewController(t)
+	client := librarymock.NewMockClient(ctrl)
+	client.EXPECT().Index(lib).Return(model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", SHA256: "hash-docs"}}}, nil)
+	client.EXPECT().Definition(lib, "docs").Return(model.Definition{Name: "docs", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, "hash-docs", nil)
+	cancel := func(_ context.Context, m tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		return next.(tui.PlaceholderModel), nil
+	}
+
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, pickSelectFirst, cancel)
+	cmd.SetArgs([]string{"--targets", "claude"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
 	}
 	got, loadErr := (lock.FileStore{}).Load(root)
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
 	if len(got.MCPs) != 0 {
-		t.Fatalf("lock = %+v, want original empty lock", got)
+		t.Fatalf("lock = %+v, want unchanged empty lock after cancel", got)
 	}
 	if _, statErr := os.Stat(filepath.Join(root, ".mcp.json")); !os.IsNotExist(statErr) {
 		t.Fatalf("claude config stat error = %v, want no rendered config", statErr)
@@ -385,7 +462,7 @@ func TestPickCommandUsesConfiguredLibrariesWhenLockHasNone(t *testing.T) {
 		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		return next.(tui.PickModel), nil
 	}
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -420,7 +497,7 @@ func TestPickCommandUsesConfiguredLibrariesMissingFromNonEmptyLock(t *testing.T)
 		return next.(tui.PickModel), nil
 	}
 
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -435,7 +512,7 @@ func TestPickCommandUsesConfiguredLibrariesMissingFromNonEmptyLock(t *testing.T)
 
 func TestPickCommandRejectsUnknownTargets(t *testing.T) {
 	t.Parallel()
-	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: writePickConfig(t, config.Library{Name: "core"}), root: t.TempDir()}, librarymock.NewMockClient(gomock.NewController(t)), nil)
+	cmd := newPickCommandWithDeps(context.Background(), &appOptions{configPath: writePickConfig(t, config.Library{Name: "core"}), root: t.TempDir()}, librarymock.NewMockClient(gomock.NewController(t)), nil, nil)
 	cmd.SetArgs([]string{"--targets", "bad"})
 
 	err := cmd.Execute()

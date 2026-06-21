@@ -524,6 +524,21 @@ func ValidateDefinition(def model.Definition) error {
 	return nil
 }
 
+// IsPlaceholder reports whether a value is a ${...} reference placeholder.
+// The length guard rejects the degenerate "${}".
+func IsPlaceholder(value string) bool {
+	return strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") && len(value) > 3
+}
+
+// PlaceholderName returns the variable name inside a ${...} placeholder, or
+// the empty string when value is not a placeholder.
+func PlaceholderName(value string) string {
+	if !IsPlaceholder(value) {
+		return ""
+	}
+	return value[2 : len(value)-1]
+}
+
 // RedactSecrets rewrites literal secret-looking env/header values into ${KEY}
 // placeholders, leaves existing ${...} references and ordinary literals untouched,
 // and returns the sorted list of placeholder variable names it created.
@@ -531,7 +546,7 @@ func RedactSecrets(def *model.Definition) []string {
 	redacted := map[string]bool{}
 	redactMap := func(values map[string]string) {
 		for key, value := range values {
-			if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+			if IsPlaceholder(value) {
 				continue
 			}
 			if IsSensitiveField(key, value) {
@@ -613,7 +628,7 @@ func importCodex(path string) ([]model.Definition, error) {
 func placeholderMap(source map[string]string) map[string]string {
 	next := map[string]string{}
 	for key, value := range source {
-		if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		if IsPlaceholder(value) {
 			next[key] = value
 			continue
 		}

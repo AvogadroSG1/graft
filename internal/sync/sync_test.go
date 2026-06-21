@@ -43,6 +43,52 @@ func TestApplyMarksPendingInputWhenMigrationRequiresInput(t *testing.T) {
 	}
 }
 
+func TestApplyAppliesPlaceholderOverrideAndBypassesAuthGate(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := ApplyWithOptions(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+		Options{Placeholders: map[string]model.PlaceholderOverrides{"docs": {Env: map[string]string{"API_KEY": "${MY_KEY}"}}}},
+	)
+	if len(result.Succeeded) != 1 || result.Succeeded[0] != "docs" {
+		t.Fatalf("ApplyWithOptions() succeeded = %+v, want docs", result.Succeeded)
+	}
+	if !adapter.rendered {
+		t.Fatal("ApplyWithOptions() did not render resolved credential MCP")
+	}
+	if got := adapter.def.Adapter("claude").Env["API_KEY"]; got != "${MY_KEY}" {
+		t.Fatalf("rendered API_KEY = %q, want ${MY_KEY}", got)
+	}
+	if result.Lock.MCPs[0].PendingInput {
+		t.Fatal("ApplyWithOptions() left resolved MCP pending input")
+	}
+}
+
+func TestApplySkipsCredentialMCPWithoutOverride(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := Apply(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+	)
+	if len(result.Skipped) != 1 || result.Skipped[0] != "docs" {
+		t.Fatalf("Apply() skipped = %+v, want docs", result.Skipped)
+	}
+	if adapter.rendered {
+		t.Fatal("Apply() rendered credential MCP without override")
+	}
+	if len(result.Warnings) == 0 || !strings.Contains(result.Warnings[0], "auth warning") {
+		t.Fatalf("Apply() warnings = %+v, want auth warning", result.Warnings)
+	}
+}
+
 func TestApplyWarnsAndRendersUnknownPinRuntime(t *testing.T) {
 	t.Parallel()
 	lib := testLibrary(t)

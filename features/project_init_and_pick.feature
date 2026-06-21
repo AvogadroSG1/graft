@@ -19,3 +19,8 @@ Feature: Project init and pick behaviors
     When graft writes graft.lock
     Then selected MCPs include library, version, target, and definition hash
 
+  Scenario: Resolving placeholder variables on a new pick
+    Given I pick a new MCP with placeholder environment variables
+    When I supply a replacement variable name at the prompt
+    Then the rendered config references the supplied variable
+
