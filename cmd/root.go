@@ -1716,6 +1716,9 @@ func savePickResultWithSideEffects(ctx context.Context, root string, cfg config.
 		}
 		overrides := map[string]model.PlaceholderOverrides{}
 		if len(items) > 0 {
+			if pRunner == nil {
+				return rollbackPickSideEffects(snapshots, fmt.Errorf("placeholder prompt runner is not configured"))
+			}
 			prompt, err := pRunner(ctx, tui.NewPlaceholderModel(items))
 			if err != nil {
 				return rollbackPickSideEffects(snapshots, err)

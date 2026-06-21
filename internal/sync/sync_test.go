@@ -68,6 +68,25 @@ func TestApplyAppliesPlaceholderOverrideAndBypassesAuthGate(t *testing.T) {
 	}
 }
 
+func TestApplyIgnoresNonPlaceholderOverrideValue(t *testing.T) {
+	t.Parallel()
+	lib := testLibrary(t)
+	adapter := &recordingAdapter{}
+	result := ApplyWithOptions(
+		lock.Lock{MCPs: []lock.InstalledMCP{{Name: "docs", Library: "core", Version: "2", DefinitionHash: "old", Target: "claude"}}},
+		config.Config{Libraries: []config.Library{lib}},
+		fakeClient{def: model.Definition{Name: "docs", Version: "2", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}}, hash: "new"},
+		[]render.AdapterByName{{Name: "claude", Adapter: adapter}},
+		Options{Placeholders: map[string]model.PlaceholderOverrides{"docs": {Env: map[string]string{"API_KEY": "literal-secret"}}}},
+	)
+	if len(result.Succeeded) != 1 {
+		t.Fatalf("ApplyWithOptions() succeeded = %+v, want docs", result.Succeeded)
+	}
+	if got := adapter.def.Adapter("claude").Env["API_KEY"]; got != "${API_KEY}" {
+		t.Fatalf("rendered API_KEY = %q, want original ${API_KEY} (literal ignored)", got)
+	}
+}
+
 func TestApplySkipsCredentialMCPWithoutOverride(t *testing.T) {
 	t.Parallel()
 	lib := testLibrary(t)

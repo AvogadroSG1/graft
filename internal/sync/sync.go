@@ -222,11 +222,15 @@ func AuthWarningForTarget(def model.Definition, target string) string {
 // definition's env/header placeholders. It only overwrites keys that already
 // exist, setting both the base maps and any per-target adapter override map that
 // carries the key, so the merged Definition.Adapter result renders the chosen
-// reference for every requested target.
+// reference for every requested target. Non-${...} override values are ignored
+// so a caller can never turn this path into a way to write literal secrets.
 func applyPlaceholderOverrides(def model.Definition, target string, ov model.PlaceholderOverrides) model.Definition {
 	targets := renderTargetList(target)
 	apply := func(base map[string]string, pick func(model.AdapterConfig) map[string]string, overrides map[string]string) {
 		for key, value := range overrides {
+			if !library.IsPlaceholder(value) {
+				continue
+			}
 			if base != nil {
 				if _, ok := base[key]; ok {
 					base[key] = value
