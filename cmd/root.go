@@ -638,6 +638,13 @@ func newAddCommand(opts *appOptions) *cobra.Command {
 					return err
 				}
 			}
+			if !force {
+				for _, def := range defs {
+					if library.DefinitionExists(lib, def.Name) {
+						return fmt.Errorf("MCP %q already exists; re-run with --force to overwrite or use 'graft mcp edit %s'", def.Name, def.Name)
+					}
+				}
+			}
 			for _, def := range defs {
 				redacted := library.RedactSecrets(&def)
 				if _, err := library.WriteDefinitionFile(lib, def, force); err != nil {

@@ -328,6 +328,13 @@ func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite boo
 	return path, nil
 }
 
+// DefinitionExists reports whether an MCP definition file already exists in the
+// library cache. It is used to preflight collisions before writing a batch.
+func DefinitionExists(lib config.Library, name string) bool {
+	_, err := os.Stat(filepath.Join(lib.CachePath, "mcps", name+".json"))
+	return err == nil
+}
+
 // ValidateMCPName returns an error if name contains path separators or would escape
 // the mcps/ directory via ".." traversal. Empty names are also rejected.
 func ValidateMCPName(name string) error {

@@ -150,6 +150,29 @@ func TestAddCollisionRequiresForce(t *testing.T) {
 	}
 }
 
+func TestAddMultiCollisionWritesNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	lib := testAuthoringLibrary(t, root)
+	cfgPath := writeAuthoringConfig(t, root, lib)
+	// "two" already exists; a wrapped paste of {one, two} must fail without
+	// writing "one" first (no partial state).
+	if _, err := library.WriteDefinition(lib, model.Definition{Name: "two", Version: "1.0.0", Command: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	stdin := `{"mcpServers":{"one":{"command":"a"},"two":{"command":"b"}}}`
+
+	if _, err := runAdd(t, root, cfgPath, stdin); err == nil {
+		t.Fatal("Execute() multi-collision error = nil")
+	}
+	if _, err := os.Stat(filepath.Join(lib.CachePath, "mcps", "one.json")); err == nil {
+		t.Fatal("one.json written despite collision on two; want nothing written")
+	}
+	if def := readAuthoringDefinition(t, lib, "two"); def.Command != "old" {
+		t.Fatalf("two command = %q, want unchanged old", def.Command)
+	}
+}
+
 func TestAddFromFile(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
