@@ -10,6 +10,14 @@ type Pin struct {
 	Hash    string `json:"hash"`
 }
 
+// PlaceholderOverrides carries user-resolved ${VAR} reference names for an MCP's
+// env and header placeholder values, keyed by the env/header key. Values are
+// always ${...} references, never literal secrets.
+type PlaceholderOverrides struct {
+	Env     map[string]string
+	Headers map[string]string
+}
+
 // AdapterConfig holds tool-specific stdio or remote transport settings.
 // When present in a Definition's Adapters map, it overrides the top-level
 // Type/Command/Args/Env/URL/Headers values.

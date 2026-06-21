@@ -20,13 +20,32 @@ import (
 )
 
 type featureState struct {
-	root       string
-	configPath string
-	output     bytes.Buffer
-	err        error
-	picked     []lock.InstalledMCP
-	pickClient *featureLibraryClient
-	pickRunner func(context.Context, tui.PickModel) (tui.PickModel, error)
+	root              string
+	configPath        string
+	output            bytes.Buffer
+	err               error
+	picked            []lock.InstalledMCP
+	pickClient        *featureLibraryClient
+	pickRunner        func(context.Context, tui.PickModel) (tui.PickModel, error)
+	placeholderRunner func(context.Context, tui.PlaceholderModel) (tui.PlaceholderModel, error)
+}
+
+// placeholderRunnerOrDefault returns the configured placeholder runner, or a
+// default that accepts every default ${VAR} when none is set.
+func (s *featureState) placeholderRunnerOrDefault() func(context.Context, tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+	if s.placeholderRunner != nil {
+		return s.placeholderRunner
+	}
+	return func(_ context.Context, m tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+		for range m.Items {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = next.(tui.PlaceholderModel)
+		}
+		if len(m.Items) == 0 {
+			m.Confirmed = true
+		}
+		return m, nil
+	}
 }
 
 func TestFeatures(t *testing.T) {
@@ -97,6 +116,9 @@ func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^I confirm selections$`, s.confirmSelections)
 	ctx.Step(`^graft writes graft\.lock$`, s.graftWritesLock)
 	ctx.Step(`^selected MCPs include library, version, target, and definition hash$`, s.selectedMCPsIncludeFields)
+	ctx.Step(`^I pick a new MCP with placeholder environment variables$`, s.pickNewMCPWithPlaceholders)
+	ctx.Step(`^I supply a replacement variable name at the prompt$`, s.runPick)
+	ctx.Step(`^the rendered config references the supplied variable$`, s.renderedConfigReferencesSuppliedVariable)
 	ctx.Step(`^an imported MCP already exists$`, s.noop)
 	ctx.Step(`^I import it again$`, s.noop)
 	ctx.Step(`^graft offers keep, use-new, editor, or skip$`, s.noop)
@@ -319,7 +341,7 @@ func (s *featureState) libraryIndex() error {
 }
 
 func (s *featureState) runPick() error {
-	command := cmd.NewPickCommandForTest(context.Background(), s.configPath, s.root, s.pickClient, s.pickRunner)
+	command := cmd.NewPickCommandForTestWithPlaceholders(context.Background(), s.configPath, s.root, s.pickClient, s.pickRunner, s.placeholderRunnerOrDefault())
 	command.SetOut(&s.output)
 	s.err = command.Execute()
 	return s.err
@@ -414,6 +436,56 @@ func (s *featureState) selectedMCPsIncludeFields() error {
 	mcp := lk.MCPs[0]
 	if mcp.Name == "" || mcp.Library == "" || mcp.Version == "" || mcp.Target == "" || mcp.DefinitionHash == "" {
 		return os.ErrInvalid
+	}
+	return nil
+}
+
+func (s *featureState) pickNewMCPWithPlaceholders() error {
+	root, err := os.MkdirTemp("", "graft-feature-placeholder-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: filepath.Join(s.root, "core"), Default: true}
+	if err := (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}}); err != nil {
+		return err
+	}
+	if err := (lock.FileStore{}).Save(s.root, lock.Lock{Libraries: []lock.LibraryRef{{Name: "core", URL: lib.URL}}, MCPs: []lock.InstalledMCP{}}); err != nil {
+		return err
+	}
+	s.pickClient = &featureLibraryClient{
+		index: model.LibraryIndex{MCPs: []model.IndexEntry{{Name: "docs", Version: "1.0.0", SHA256: "hash-docs"}}},
+		def:   model.Definition{Name: "docs", Version: "1.0.0", Command: "npx", Env: map[string]string{"API_KEY": "${API_KEY}"}},
+		hash:  "hash-docs",
+	}
+	s.pickRunner = func(ctx context.Context, model tui.PickModel) (tui.PickModel, error) {
+		next, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
+		model = next.(tui.PickModel)
+		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(tui.PickModel), nil
+	}
+	s.placeholderRunner = func(ctx context.Context, m tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+		for _, r := range "MY_KEY" {
+			next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m = next.(tui.PlaceholderModel)
+		}
+		next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		return next.(tui.PlaceholderModel), nil
+	}
+	return nil
+}
+
+func (s *featureState) renderedConfigReferencesSuppliedVariable() error {
+	if s.err != nil {
+		return s.err
+	}
+	data, err := os.ReadFile(filepath.Join(s.root, ".mcp.json"))
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(string(data), "${MY_KEY}") {
+		return fmt.Errorf("claude config = %s, want ${MY_KEY}", data)
 	}
 	return nil
 }

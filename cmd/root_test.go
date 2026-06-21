@@ -62,7 +62,7 @@ func TestInitCommandLaunchesPickForSelectedLibrary(t *testing.T) {
 		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		return next.(tui.PickModel), nil
 	}
-	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	initCmd.SetArgs([]string{"--targets", "codex", "--yes"})
 
 	if err := initCmd.Execute(); err != nil {
@@ -118,7 +118,7 @@ func TestInitCommandStagesPostPickLock(t *testing.T) {
 		next, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 		return next.(tui.PickModel), nil
 	}
-	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner)
+	initCmd := newInitCommandWithDeps(context.Background(), &appOptions{configPath: cfgPath, root: root}, client, runner, acceptDefaultPlaceholders)
 	initCmd.SetArgs([]string{"--targets", "claude", "--yes"})
 
 	if err := initCmd.Execute(); err != nil {

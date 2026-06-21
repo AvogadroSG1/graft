@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -125,11 +126,11 @@ func createInitTargets(root string, targetNames []string) ([]string, error) {
 	return stagePaths, nil
 }
 
-func runPickAfterInit(ctx context.Context, cmd *cobra.Command, opts *appOptions, lk lock.Lock, targets string, client library.Client, runner pickRunner) error {
+func runPickAfterInit(ctx context.Context, cmd *cobra.Command, opts *appOptions, lk lock.Lock, targets string, client library.Client, runner pickRunner, pRunner placeholderRunner) error {
 	if len(lk.Libraries) == 0 {
 		return nil
 	}
-	pickCmd := newPickCommandWithDeps(ctx, opts, client, runner)
+	pickCmd := newPickCommandWithDeps(ctx, opts, client, runner, pRunner)
 	pickCmd.SetArgs([]string{"--targets", targets})
 	pickCmd.SetIn(cmd.InOrStdin())
 	pickCmd.SetOut(cmd.OutOrStdout())
@@ -138,10 +139,10 @@ func runPickAfterInit(ctx context.Context, cmd *cobra.Command, opts *appOptions,
 }
 
 func newInitCommand(ctx context.Context, opts *appOptions) *cobra.Command {
-	return newInitCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
+	return newInitCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick, runBubbleteaPlaceholders)
 }
 
-func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
+func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner, pRunner placeholderRunner) *cobra.Command {
 	var libraryName string
 	var targets string
 	var yes bool
@@ -171,7 +172,7 @@ func newInitCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err := (lock.FileStore{}).Save(opts.root, lk); err != nil {
 				return err
 			}
-			if err := runPickAfterInit(ctx, cmd, opts, lk, targets, client, runner); err != nil {
+			if err := runPickAfterInit(ctx, cmd, opts, lk, targets, client, runner, pRunner); err != nil {
 				return err
 			}
 			if err := stageInitFiles(opts.root, stagePaths); err != nil {
@@ -1522,8 +1523,10 @@ func newInstallHooksCommand(opts *appOptions) *cobra.Command {
 
 type pickRunner func(context.Context, tui.PickModel) (tui.PickModel, error)
 
+type placeholderRunner func(context.Context, tui.PlaceholderModel) (tui.PlaceholderModel, error)
+
 func newPickCommand(ctx context.Context, opts *appOptions) *cobra.Command {
-	return newPickCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick)
+	return newPickCommandWithDeps(ctx, opts, library.GitClient{}, runBubbleteaPick, runBubbleteaPlaceholders)
 }
 
 func loadPickDeps(ctx context.Context, cmd *cobra.Command, opts *appOptions, targets string, client library.Client) (string, config.Config, lock.Lock, error) {
@@ -1563,7 +1566,7 @@ func printPickWarnings(cmd *cobra.Command, warnings []string) error {
 	return nil
 }
 
-func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner) *cobra.Command {
+func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client library.Client, runner pickRunner, pRunner placeholderRunner) *cobra.Command {
 	var targets string
 	cmd := &cobra.Command{
 		Use:   "pick",
@@ -1596,7 +1599,7 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 			if err != nil {
 				return err
 			}
-			return savePickResultWithSideEffects(opts.root, cfg, client, lk, next)
+			return savePickResultWithSideEffects(ctx, opts.root, cfg, client, lk, next, pRunner)
 		},
 	}
 	cmd.Flags().StringVar(&targets, "targets", "both", "claude, codex, or both")
@@ -1606,13 +1609,19 @@ func newPickCommandWithDeps(ctx context.Context, opts *appOptions, client librar
 // NewPickCommandForTest exposes the dependency-injected pick command to black-box
 // BDD tests in the features package.
 func NewPickCommandForTest(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error)) *cobra.Command {
-	return newPickCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
+	return newPickCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner, runBubbleteaPlaceholders)
+}
+
+// NewPickCommandForTestWithPlaceholders is like NewPickCommandForTest but also
+// injects the placeholder-resolution prompt runner.
+func NewPickCommandForTestWithPlaceholders(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error), pRunner func(context.Context, tui.PlaceholderModel) (tui.PlaceholderModel, error)) *cobra.Command {
+	return newPickCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner, pRunner)
 }
 
 // NewInitCommandForTest exposes the dependency-injected init command to BDD
 // tests that need to avoid a real terminal picker or git-backed library cache.
 func NewInitCommandForTest(ctx context.Context, configPath, root string, client library.Client, runner func(context.Context, tui.PickModel) (tui.PickModel, error)) *cobra.Command {
-	return newInitCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner)
+	return newInitCommandWithDeps(ctx, &appOptions{configPath: configPath, root: root}, client, runner, runBubbleteaPlaceholders)
 }
 
 // NewLibraryCommandForTest exposes the dependency-injected library command to
@@ -1637,6 +1646,18 @@ func runBubbleteaPick(ctx context.Context, model tui.PickModel) (tui.PickModel, 
 		return tui.PickModel{}, fmt.Errorf("picker returned unexpected model %T", final)
 	}
 	return picker, nil
+}
+
+func runBubbleteaPlaceholders(ctx context.Context, model tui.PlaceholderModel) (tui.PlaceholderModel, error) {
+	final, err := tea.NewProgram(model, tea.WithContext(ctx)).Run()
+	if err != nil {
+		return tui.PlaceholderModel{}, err
+	}
+	prompt, ok := final.(tui.PlaceholderModel)
+	if !ok {
+		return tui.PlaceholderModel{}, fmt.Errorf("placeholder prompt returned unexpected model %T", final)
+	}
+	return prompt, nil
 }
 
 func lockWithConfiguredLibraries(lk lock.Lock, cfg config.Config) lock.Lock {
@@ -1675,7 +1696,7 @@ func removeStalePickTargets(adapters []render.AdapterByName, oldMCPs, nextMCPs m
 	return nil
 }
 
-func savePickResultWithSideEffects(root string, cfg config.Config, client library.Client, old lock.Lock, next lock.Lock) error {
+func savePickResultWithSideEffects(ctx context.Context, root string, cfg config.Config, client library.Client, old lock.Lock, next lock.Lock, pRunner placeholderRunner) error {
 	adapters := []render.AdapterByName{
 		{Name: "claude", Adapter: render.NewClaudeAdapter(root)},
 		{Name: "codex", Adapter: render.NewCodexAdapter(root)},
@@ -1689,7 +1710,26 @@ func savePickResultWithSideEffects(root string, cfg config.Config, client librar
 	}
 	resultLock := next
 	if syncNames := pickSyncNames(old, next); len(syncNames) > 0 {
-		result := graftsync.ApplyWithOptions(preparePickSyncLock(old, next), cfg, client, adapters, graftsync.Options{Names: syncNames})
+		items, prefetched, err := collectPlaceholderItems(cfg, client, old, next)
+		if err != nil {
+			return rollbackPickSideEffects(snapshots, err)
+		}
+		overrides := map[string]model.PlaceholderOverrides{}
+		if len(items) > 0 {
+			if pRunner == nil {
+				return rollbackPickSideEffects(snapshots, fmt.Errorf("placeholder prompt runner is not configured"))
+			}
+			prompt, err := pRunner(ctx, tui.NewPlaceholderModel(items))
+			if err != nil {
+				return rollbackPickSideEffects(snapshots, err)
+			}
+			if !prompt.Confirmed {
+				// Cancel is a clean no-op: restore touched targets, write nothing.
+				return restorePickSnapshots(snapshots)
+			}
+			overrides = prompt.Results()
+		}
+		result := graftsync.ApplyWithOptions(preparePickSyncLock(old, next), cfg, client, adapters, graftsync.Options{Names: syncNames, Placeholders: overrides, Prefetched: prefetched})
 		if err := pickSyncError(result); err != nil {
 			return rollbackPickSideEffects(snapshots, err)
 		}
@@ -1699,6 +1739,77 @@ func savePickResultWithSideEffects(root string, cfg config.Config, client librar
 		return rollbackPickSideEffects(snapshots, err)
 	}
 	return nil
+}
+
+// collectPlaceholderItems returns, for MCPs new to the project, the ordered and
+// deduped list of ${...} placeholder tokens (env and headers across each
+// requested target) that need a reference name from the user. It also returns
+// the definitions it fetched, keyed by "library/name", so the subsequent sync
+// can reuse them instead of fetching again.
+func collectPlaceholderItems(cfg config.Config, client library.Client, old lock.Lock, next lock.Lock) ([]tui.PlaceholderItem, map[string]graftsync.DefinitionResult, error) {
+	oldKeys := map[string]bool{}
+	for _, mcp := range old.MCPs {
+		oldKeys[pickLockKey(mcp.Library, mcp.Name)] = true
+	}
+	items := []tui.PlaceholderItem{}
+	prefetched := map[string]graftsync.DefinitionResult{}
+	seen := map[string]bool{}
+	for _, mcp := range next.MCPs {
+		if oldKeys[pickLockKey(mcp.Library, mcp.Name)] {
+			continue
+		}
+		lib, ok := cfg.Library(mcp.Library)
+		if !ok {
+			continue
+		}
+		def, hash, err := client.Definition(lib, mcp.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s: definition: %w", mcp.Name, err)
+		}
+		prefetched[pickLockKey(mcp.Library, mcp.Name)] = graftsync.DefinitionResult{Definition: def, Hash: hash}
+		for _, target := range parseTargets(mcp.Target) {
+			adapter := def.Adapter(target)
+			items = appendPlaceholderItems(items, seen, mcp.Name, "env", adapter.Env)
+			items = appendPlaceholderItems(items, seen, mcp.Name, "header", adapter.Headers)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].MCP != items[j].MCP {
+			return items[i].MCP < items[j].MCP
+		}
+		if items[i].Scope != items[j].Scope {
+			return items[i].Scope < items[j].Scope // "env" before "header"
+		}
+		return items[i].Key < items[j].Key
+	})
+	return items, prefetched, nil
+}
+
+func appendPlaceholderItems(items []tui.PlaceholderItem, seen map[string]bool, mcp, scope string, values map[string]string) []tui.PlaceholderItem {
+	for key, value := range values {
+		if !library.IsPlaceholder(value) {
+			continue
+		}
+		dedupeKey := mcp + "\x00" + scope + "\x00" + key
+		if seen[dedupeKey] {
+			continue
+		}
+		seen[dedupeKey] = true
+		items = append(items, tui.PlaceholderItem{MCP: mcp, Scope: scope, Key: key, DefaultVar: library.PlaceholderName(value)})
+	}
+	return items
+}
+
+// restorePickSnapshots restores adapter targets without surfacing an error,
+// used when the user cancels the placeholder prompt.
+func restorePickSnapshots(snapshots []pickAdapterSnapshot) error {
+	var errs []error
+	for idx := len(snapshots) - 1; idx >= 0; idx-- {
+		if err := snapshots[idx].adapter.Restore(snapshots[idx].snapshot); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s target: %w", snapshots[idx].name, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func pickSyncNames(old lock.Lock, next lock.Lock) []string {
