@@ -17,6 +17,7 @@ graft solves the problem of keeping MCP server definitions consistent across pro
 
 ```
 graft init                              Initialize graft in the current project (creates graft.lock)
+graft add [name]                        Add an MCP to the default library by pasting full JSON on stdin (--file, --force)
 graft library add <name> <url>          Clone and register a git-backed MCP library
 graft library migrate-from-claude <name> Create a local library from Claude config (--from, --force, --dry-run)
 graft library list                      List all registered libraries
