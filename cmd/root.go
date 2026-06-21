@@ -70,6 +70,7 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	root.PersistentFlags().StringVar(&opts.root, "root", ".", "project root")
 	root.AddCommand(
 		newInitCommand(ctx, opts),
+		newAddCommand(opts),
 		newLibraryCommand(ctx, opts),
 		newMCPCommand(ctx, opts),
 		newStatusCommand(opts),
@@ -596,6 +597,89 @@ func newMCPCommand(ctx context.Context, opts *appOptions) *cobra.Command {
 	cmd := &cobra.Command{Use: "mcp", Short: "Author MCP definitions", Args: cobra.NoArgs}
 	cmd.AddCommand(newMCPImportCommand(opts), newMCPAddCommand(opts), newMCPEditCommand(opts), newMCPPushCommand(ctx, opts))
 	return cmd
+}
+
+func newAddCommand(opts *appOptions) *cobra.Command {
+	var fromFile string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "add [name]",
+		Short: "Add an MCP to the default library by pasting its JSON",
+		Long: "Add an MCP definition to the default library from a full JSON snippet.\n\n" +
+			"Paste the JSON on stdin (end with Ctrl-D) or pass --file. Both the wrapped\n" +
+			"{\"mcpServers\":{...}} form and a bare single-server object are accepted; for a\n" +
+			"bare object the name comes from a \"name\" field or the positional argument.\n\n" +
+			"Literal secret-looking values are redacted into ${KEY} environment-variable\n" +
+			"placeholders and reported; existing ${VAR} references are kept as-is.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			lib, ok := cfg.DefaultLibrary()
+			if !ok {
+				return fmt.Errorf("no default library configured")
+			}
+			data, err := readAddInput(cmd, fromFile)
+			if err != nil {
+				return err
+			}
+			name := ""
+			if len(args) == 1 {
+				name = args[0]
+			}
+			defs, err := library.ParseMCPJSON(data, name)
+			if err != nil {
+				return err
+			}
+			for _, def := range defs {
+				if err := library.ValidateDefinition(def); err != nil {
+					return err
+				}
+			}
+			for _, def := range defs {
+				redacted := library.RedactSecrets(&def)
+				if _, err := library.WriteDefinitionFile(lib, def, force); err != nil {
+					if strings.Contains(err.Error(), "already exists") {
+						return fmt.Errorf("MCP %q already exists; re-run with --force to overwrite or use 'graft mcp edit %s'", def.Name, def.Name)
+					}
+					return err
+				}
+				if err := printf(cmd, "added %s\n", def.Name); err != nil {
+					return err
+				}
+				if len(redacted) > 0 {
+					if err := printf(cmd, "redacted secret(s): %s — set these env vars before use\n", strings.Join(redacted, ", ")); err != nil {
+						return err
+					}
+				}
+			}
+			_, err = (library.GitClient{}).Reindex(lib)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&fromFile, "file", "", "read MCP JSON from a file instead of stdin")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing MCP definition")
+	return cmd
+}
+
+func readAddInput(cmd *cobra.Command, fromFile string) ([]byte, error) {
+	if fromFile != "" {
+		data, err := os.ReadFile(fromFile)
+		if err != nil {
+			return nil, fmt.Errorf("read %q: %w", fromFile, err)
+		}
+		return data, nil
+	}
+	if err := eprintf(cmd, "Paste MCP JSON, then press Ctrl-D:\n"); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(cmd.InOrStdin())
+	if err != nil {
+		return nil, fmt.Errorf("read pasted JSON: %w", err)
+	}
+	return data, nil
 }
 
 func importDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {

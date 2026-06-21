@@ -193,16 +193,7 @@ func AuthWarningForTarget(def model.Definition, target string) string {
 
 func credentialMapHasSensitiveFields(values map[string]string) bool {
 	for key, value := range values {
-		upperKey := strings.ToUpper(key)
-		upperValue := strings.ToUpper(value)
-		if strings.Contains(upperKey, "TOKEN") ||
-			strings.Contains(upperKey, "SECRET") ||
-			strings.Contains(upperKey, "KEY") ||
-			strings.Contains(upperKey, "PASSWORD") ||
-			strings.Contains(upperKey, "CREDENTIAL") ||
-			upperKey == "AUTHORIZATION" ||
-			upperKey == "BEARER_TOKEN_ENV_VAR" ||
-			strings.Contains(upperValue, "BEARER ") {
+		if library.IsSensitiveField(key, value) {
 			return true
 		}
 	}
