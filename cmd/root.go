@@ -711,12 +711,12 @@ func newAddInteractiveCommand(opts *appOptions) *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no default library configured")
 			}
-			def, err := runAddWizard(cmd, lib)
+			def, overwrite, err := runAddWizard(cmd, lib)
 			if err != nil {
 				return err
 			}
 			redacted := library.RedactSecrets(&def)
-			if _, err := library.WriteDefinitionFile(lib, def, true); err != nil {
+			if _, err := library.WriteDefinitionFile(lib, def, overwrite); err != nil {
 				return err
 			}
 			if err := printf(cmd, "added %s\n", def.Name); err != nil {
@@ -734,29 +734,30 @@ func newAddInteractiveCommand(opts *appOptions) *cobra.Command {
 }
 
 // runAddWizard walks the user through authoring an MCP definition field by
-// field. It returns the validated definition ready to write; a returned error
-// means the user aborted or input ended early.
-func runAddWizard(cmd *cobra.Command, lib config.Library) (model.Definition, error) {
+// field. It returns the validated definition and whether the user confirmed
+// overwriting an existing definition; a returned error means the user aborted
+// or input ended early.
+func runAddWizard(cmd *cobra.Command, lib config.Library) (model.Definition, bool, error) {
 	reader := bufio.NewReader(cmd.InOrStdin())
 
 	name, err := promptName(cmd, reader)
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	description, err := promptLine(cmd, reader, "Description: ")
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	version, err := promptLine(cmd, reader, "Version [0.1.0]: ")
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	if version == "" {
 		version = "0.1.0"
 	}
 	transportType, err := promptType(cmd, reader)
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 
 	def := model.Definition{
@@ -772,51 +773,52 @@ func runAddWizard(cmd *cobra.Command, lib config.Library) (model.Definition, err
 	case "http", "sse":
 		url, err := promptRequired(cmd, reader, "URL: ")
 		if err != nil {
-			return model.Definition{}, err
+			return model.Definition{}, false, err
 		}
 		def.URL = url
 		headers, err := promptKeyValues(cmd, reader, "Header (KEY=VALUE, blank to finish): ")
 		if err != nil {
-			return model.Definition{}, err
+			return model.Definition{}, false, err
 		}
 		def.Headers = headers
 	default:
 		command, err := promptRequired(cmd, reader, "Command: ")
 		if err != nil {
-			return model.Definition{}, err
+			return model.Definition{}, false, err
 		}
 		def.Command = command
 		argsText, err := promptLine(cmd, reader, "Args: ")
 		if err != nil {
-			return model.Definition{}, err
+			return model.Definition{}, false, err
 		}
 		def.Args = strings.Fields(argsText)
 	}
 
 	env, err := promptKeyValues(cmd, reader, "Env var (KEY=VALUE, blank to finish): ")
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	def.Env = env
 	tagsText, err := promptLine(cmd, reader, "Tags (comma-separated): ")
 	if err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	def.Tags = splitCSV(tagsText)
 
 	if err := library.ValidateDefinition(def); err != nil {
-		return model.Definition{}, err
+		return model.Definition{}, false, err
 	}
 	if library.DefinitionExists(lib, def.Name) {
 		answer, err := promptLine(cmd, reader, fmt.Sprintf("MCP %q already exists; overwrite? [y/N] ", def.Name))
 		if err != nil {
-			return model.Definition{}, err
+			return model.Definition{}, false, err
 		}
 		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
-			return model.Definition{}, fmt.Errorf("MCP %q already exists; not overwritten", def.Name)
+			return model.Definition{}, false, fmt.Errorf("MCP %q already exists; not overwritten", def.Name)
 		}
+		return def, true, nil
 	}
-	return def, nil
+	return def, false, nil
 }
 
 // promptName loops until the user supplies a non-empty, valid MCP name.
