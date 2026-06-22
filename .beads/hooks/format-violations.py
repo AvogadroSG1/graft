@@ -2,13 +2,15 @@
 """Format CALM bridge JSON as agent-readable YAML.
 
 Usage:
-  calm-bridge check ... | python3 .beads/hooks/format-violations.py \
+  stack-fitness-functions client validate ... | python3 hooks/format-violations.py \
       --mode <block|advisory> --file <relative/path>
 """
+from __future__ import annotations
+
 import argparse
 import json
 import sys
-from typing import Any, Optional, Union
+from typing import Any
 
 try:
     import yaml
@@ -28,7 +30,7 @@ def _load_guidance() -> dict[str, dict[str, Any]]:
 
     POC: data is inline. To externalize, replace this body with:
         import os
-        path = os.environ.get("CALM_GUIDANCE_FILE", <default_path>)
+        path = os.environ.get("STACK_FITNESS_FUNCTIONS_GUIDANCE_FILE", <default_path>)
         return yaml.safe_load(open(path))
     Call sites never change.
     """
@@ -109,7 +111,7 @@ def _load_guidance() -> dict[str, dict[str, Any]]:
     }
 
 
-def format_value(v: float) -> Union[int, float]:
+def format_value(v: float) -> int | float:
     """Normalise a metric value: return int for whole numbers, float rounded to 3dp."""
     try:
         if isinstance(v, (int, float)) and float(v).is_integer():
@@ -124,68 +126,12 @@ def _normalise_fn_key(raw: str) -> str:
     return raw.replace("_", "-")
 
 
-def _build_location(function_name: str, calm_node: str) -> str:
-    """Build the location string from function name and calm node."""
-    if not function_name:
-        return calm_node
-    return f"{function_name} ({calm_node})" if calm_node else function_name
-
-
-def _process_violation(
-    i: int,
-    v: dict,
-    guidance: dict[str, dict[str, Any]],
-    mode_label: str,
-) -> Optional[dict[str, Any]]:
-    """Process one violation dict into an output entry, or None to skip."""
-    try:
-        fn = _normalise_fn_key(v.get("fitness_function", "") or "")
-        value = v.get("value", 0)
-        limit = v.get("limit", 0)
-        # Validate that value and limit are numeric — raises TypeError for object() or None
-        float(value)  # type: ignore[arg-type]
-        float(limit)  # type: ignore[arg-type]
-        function_name = v.get("function", "") or ""
-        calm_node = v.get("calm_node", "") or ""
-        fn_guidance = guidance.get(fn, {})
-        operator = fn_guidance.get("operator", "<=")
-
-        if not fn_guidance:
-            print(
-                f"format-violations: no guidance for fitness function {fn!r}",
-                file=sys.stderr,
-            )
-
-        location = _build_location(function_name, calm_node)
-
-        # sort_keys=False preserves this insertion order — agent reads top to bottom
-        entry: dict[str, Any] = {
-            "fitness_function": fn,
-            "mode": mode_label,
-            "result": format_value(value),
-            "target": f"{operator} {format_value(limit)}",
-        }
-        if location:
-            entry["location"] = location
-        if fn_guidance.get("meaning"):
-            entry["meaning"] = fn_guidance["meaning"]
-        if fn_guidance.get("remediation"):
-            entry["remediation"] = fn_guidance["remediation"]
-        return entry
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"format-violations: skipping violation[{i}]: {exc}",
-            file=sys.stderr,
-        )
-        return None
-
-
 def _build_output(
     violations: list[dict[str, Any]],
     file: str,
     mode: str,
     status: str,
-) -> Optional[dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Build the YAML output dict from validated bridge data.
 
     Returns None when there are no processable violations.
@@ -198,10 +144,52 @@ def _build_output(
     guidance = _load_guidance()
     mode_label = _MODE_LABELS.get(mode, mode)
     entries: list[dict[str, Any]] = []
+
     for i, v in enumerate(violations):
-        entry = _process_violation(i, v, guidance, mode_label)
-        if entry is not None:
+        try:
+            fn = _normalise_fn_key(v.get("fitness_function", "") or "")
+            value = v.get("value", 0)
+            limit = v.get("limit", 0)
+            # Validate that value and limit are numeric — raises TypeError for object() or None
+            float(value)  # type: ignore[arg-type]
+            float(limit)  # type: ignore[arg-type]
+            function_name = v.get("function", "") or ""
+            calm_node = v.get("calm_node", "") or ""
+            fn_guidance = guidance.get(fn, {})
+            operator = fn_guidance.get("operator", "<=")
+
+            if not fn_guidance:
+                print(
+                    f"format-violations: no guidance for fitness function {fn!r}",
+                    file=sys.stderr,
+                )
+
+            location = calm_node
+            if function_name:
+                location = (
+                    f"{function_name} ({calm_node})" if calm_node else function_name
+                )
+
+            # sort_keys=False preserves this insertion order — agent reads top to bottom
+            entry: dict[str, Any] = {
+                "fitness_function": fn,
+                "mode": mode_label,
+                "result": format_value(value),
+                "target": f"{operator} {format_value(limit)}",
+            }
+            if location:
+                entry["location"] = location
+            if fn_guidance.get("meaning"):
+                entry["meaning"] = fn_guidance["meaning"]
+            if fn_guidance.get("remediation"):
+                entry["remediation"] = fn_guidance["remediation"]
+
             entries.append(entry)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"format-violations: skipping violation[{i}]: {exc}",
+                file=sys.stderr,
+            )
 
     if not entries:
         return None
@@ -213,42 +201,6 @@ def _build_output(
         },
         "violations": entries,
     }
-
-
-def _read_json_payload() -> Optional[dict]:
-    """Read and parse JSON from stdin, returning None on parse error."""
-    try:
-        return json.load(sys.stdin)
-    except json.JSONDecodeError as exc:
-        print(f"format-violations: invalid JSON on stdin: {exc}", file=sys.stderr)
-        return None
-
-
-def _emit_yaml(output: dict[str, Any], violations_raw: list, status: str) -> None:
-    """Emit output as YAML, falling back to plain-text summary on yaml failure."""
-    try:
-        # sort_keys=False: preserve insertion order — agent reads top to bottom
-        result = yaml.dump(
-            output,
-            default_flow_style=False,
-            allow_unicode=True,
-            sort_keys=False,
-        )
-        print(result)
-        sys.stdout.flush()
-    except Exception as exc:  # noqa: BLE001
-        # Degraded fallback: plain-text summary so the hook does not block
-        print("calm_check:", file=sys.stdout)
-        print(f"  status: {status}", file=sys.stdout)
-        print("  violations:", file=sys.stdout)
-        for v in violations_raw:
-            fn = v.get("fitness_function", "unknown") if isinstance(v, dict) else "unknown"
-            print(f"    - {fn}", file=sys.stdout)
-        print(
-            f"format-violations: yaml.dump failed ({exc}); used plain-text fallback",
-            file=sys.stderr,
-        )
-        sys.stdout.flush()
 
 
 def main() -> None:
@@ -284,8 +236,10 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    payload = _read_json_payload()
-    if payload is None:
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        print(f"format-violations: invalid JSON on stdin: {exc}", file=sys.stderr)
         sys.exit(0)
 
     try:
@@ -312,7 +266,29 @@ def main() -> None:
         if output is None:
             sys.exit(0)
 
-        _emit_yaml(output, violations_raw, status)
+        try:
+            # sort_keys=False: preserve insertion order — agent reads top to bottom
+            result = yaml.dump(
+                output,
+                default_flow_style=False,
+                allow_unicode=True,
+                sort_keys=False,
+            )
+            print(result)
+            sys.stdout.flush()
+        except Exception as exc:  # noqa: BLE001
+            # Degraded fallback: plain-text summary so the hook does not block
+            print("calm_check:", file=sys.stdout)
+            print(f"  status: {status}", file=sys.stdout)
+            print("  violations:", file=sys.stdout)
+            for v in violations_raw:
+                fn = v.get("fitness_function", "unknown") if isinstance(v, dict) else "unknown"
+                print(f"    - {fn}", file=sys.stdout)
+            print(
+                f"format-violations: yaml.dump failed ({exc}); used plain-text fallback",
+                file=sys.stderr,
+            )
+            sys.stdout.flush()
 
     except Exception as exc:  # noqa: BLE001
         print(f"format-violations: unexpected error: {exc}", file=sys.stderr)
