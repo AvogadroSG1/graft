@@ -870,7 +870,7 @@ func promptRequired(cmd *cobra.Command, reader *bufio.Reader, label string) (str
 		if value != "" {
 			return value, nil
 		}
-		if err := eprintf(cmd, "value is required\n"); err != nil {
+		if err := eprintf(cmd, "%s is required\n", strings.TrimRight(label, ": ")); err != nil {
 			return "", err
 		}
 	}
