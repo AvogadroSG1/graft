@@ -72,6 +72,7 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 	root.AddCommand(
 		newInitCommand(ctx, opts),
 		newAddCommand(opts),
+		newAddInteractiveCommand(opts),
 		newLibraryCommand(ctx, opts),
 		newMCPCommand(ctx, opts),
 		newStatusCommand(opts),
@@ -688,6 +689,217 @@ func readAddInput(cmd *cobra.Command, fromFile string) ([]byte, error) {
 		return nil, fmt.Errorf("read pasted JSON: %w", err)
 	}
 	return data, nil
+}
+
+func newAddInteractiveCommand(opts *appOptions) *cobra.Command {
+	return &cobra.Command{
+		Use:   "add-interactive",
+		Short: "Add an MCP to the default library via an interactive wizard",
+		Long: "Add an MCP definition to the default library by answering a series of\n" +
+			"questions. The wizard asks for the name, description, version, transport\n" +
+			"type, and the fields each transport needs (command/args for stdio, url/\n" +
+			"headers for http and sse), then environment variables and tags.\n\n" +
+			"Literal secret-looking values are redacted into ${KEY} environment-variable\n" +
+			"placeholders and reported; existing ${VAR} references are kept as-is.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(opts.configPath)
+			if err != nil {
+				return err
+			}
+			lib, ok := cfg.DefaultLibrary()
+			if !ok {
+				return fmt.Errorf("no default library configured")
+			}
+			def, overwrite, err := runAddWizard(cmd, lib)
+			if err != nil {
+				return err
+			}
+			redacted := library.RedactSecrets(&def)
+			if _, err := library.WriteDefinitionFile(lib, def, overwrite); err != nil {
+				return err
+			}
+			if err := printf(cmd, "added %s\n", def.Name); err != nil {
+				return err
+			}
+			if len(redacted) > 0 {
+				if err := printf(cmd, "redacted secret(s): %s — set these env vars before use\n", strings.Join(redacted, ", ")); err != nil {
+					return err
+				}
+			}
+			_, err = (library.GitClient{}).Reindex(lib)
+			return err
+		},
+	}
+}
+
+// runAddWizard walks the user through authoring an MCP definition field by
+// field. It returns the validated definition and whether the user confirmed
+// overwriting an existing definition; a returned error means the user aborted
+// or input ended early.
+func runAddWizard(cmd *cobra.Command, lib config.Library) (model.Definition, bool, error) {
+	reader := bufio.NewReader(cmd.InOrStdin())
+
+	name, err := promptName(cmd, reader)
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	description, err := promptLine(cmd, reader, "Description: ")
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	version, err := promptLine(cmd, reader, "Version [0.1.0]: ")
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	if version == "" {
+		version = "0.1.0"
+	}
+	transportType, err := promptType(cmd, reader)
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+
+	def := model.Definition{
+		Name:        name,
+		Version:     version,
+		Description: description,
+		Type:        transportType,
+		Env:         map[string]string{},
+		Headers:     map[string]string{},
+	}
+
+	switch transportType {
+	case "http", "sse":
+		url, err := promptRequired(cmd, reader, "URL: ")
+		if err != nil {
+			return model.Definition{}, false, err
+		}
+		def.URL = url
+		headers, err := promptKeyValues(cmd, reader, "Header (KEY=VALUE, blank to finish): ")
+		if err != nil {
+			return model.Definition{}, false, err
+		}
+		def.Headers = headers
+	default:
+		command, err := promptRequired(cmd, reader, "Command: ")
+		if err != nil {
+			return model.Definition{}, false, err
+		}
+		def.Command = command
+		argsText, err := promptLine(cmd, reader, "Args: ")
+		if err != nil {
+			return model.Definition{}, false, err
+		}
+		def.Args = strings.Fields(argsText)
+	}
+
+	env, err := promptKeyValues(cmd, reader, "Env var (KEY=VALUE, blank to finish): ")
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	def.Env = env
+	tagsText, err := promptLine(cmd, reader, "Tags (comma-separated): ")
+	if err != nil {
+		return model.Definition{}, false, err
+	}
+	def.Tags = splitCSV(tagsText)
+
+	if err := library.ValidateDefinition(def); err != nil {
+		return model.Definition{}, false, err
+	}
+	if library.DefinitionExists(lib, def.Name) {
+		answer, err := promptLine(cmd, reader, fmt.Sprintf("MCP %q already exists; overwrite? [y/N] ", def.Name))
+		if err != nil {
+			return model.Definition{}, false, err
+		}
+		if strings.ToLower(answer) != "y" && strings.ToLower(answer) != "yes" {
+			return model.Definition{}, false, fmt.Errorf("MCP %q already exists; not overwritten", def.Name)
+		}
+		return def, true, nil
+	}
+	return def, false, nil
+}
+
+// promptName loops until the user supplies a non-empty, valid MCP name.
+func promptName(cmd *cobra.Command, reader *bufio.Reader) (string, error) {
+	for {
+		name, err := promptLine(cmd, reader, "Name: ")
+		if err != nil {
+			return "", err
+		}
+		if name == "" {
+			if err := eprintf(cmd, "name is required\n"); err != nil {
+				return "", err
+			}
+			continue
+		}
+		if err := library.ValidateMCPName(name); err != nil {
+			if err := eprintf(cmd, "%v\n", err); err != nil {
+				return "", err
+			}
+			continue
+		}
+		return name, nil
+	}
+}
+
+// promptType loops until the user supplies a recognized transport type (or a
+// blank line, which defaults to stdio).
+func promptType(cmd *cobra.Command, reader *bufio.Reader) (string, error) {
+	for {
+		t, err := promptLine(cmd, reader, "Type [stdio/http/sse]: ")
+		if err != nil {
+			return "", err
+		}
+		switch t {
+		case "", "stdio", "http", "sse":
+			return t, nil
+		}
+		if err := eprintf(cmd, "unknown type %q (want stdio, http, or sse)\n", t); err != nil {
+			return "", err
+		}
+	}
+}
+
+// promptRequired loops until the user supplies a non-empty value.
+func promptRequired(cmd *cobra.Command, reader *bufio.Reader, label string) (string, error) {
+	for {
+		value, err := promptLine(cmd, reader, label)
+		if err != nil {
+			return "", err
+		}
+		if value != "" {
+			return value, nil
+		}
+		if err := eprintf(cmd, "%s is required\n", strings.TrimRight(label, ": ")); err != nil {
+			return "", err
+		}
+	}
+}
+
+// promptKeyValues collects KEY=VALUE pairs until a blank line. Malformed lines
+// (missing "=" or empty key) are reported and skipped.
+func promptKeyValues(cmd *cobra.Command, reader *bufio.Reader, label string) (map[string]string, error) {
+	out := map[string]string{}
+	for {
+		line, err := promptLine(cmd, reader, label)
+		if err != nil {
+			return nil, err
+		}
+		if line == "" {
+			return out, nil
+		}
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			if err := eprintf(cmd, "expected KEY=VALUE\n"); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		out[key] = strings.TrimSpace(value)
+	}
 }
 
 func importDefinition(cmd *cobra.Command, reader *bufio.Reader, lib config.Library, def model.Definition) (bool, error) {

@@ -3,6 +3,7 @@ package features
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,6 +126,54 @@ func (s *featureState) InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^authored MCP definitions changed$`, s.noop)
 	ctx.Step(`^I run graft mcp push --yes$`, s.noop)
 	ctx.Step(`^graft recomputes the index and reports the commit flow$`, s.noop)
+	ctx.Step(`^a default library for authoring$`, s.defaultLibraryForAuthoring)
+	ctx.Step(`^I run graft add-interactive and answer the prompts$`, s.runAddInteractive)
+	ctx.Step(`^the answered MCP definition is written$`, s.answeredDefinitionWritten)
+}
+
+func (s *featureState) defaultLibraryForAuthoring() error {
+	root, err := os.MkdirTemp("", "graft-feature-add-interactive-*")
+	if err != nil {
+		return err
+	}
+	s.root = root
+	s.configPath = filepath.Join(s.root, "config.json")
+	cachePath := filepath.Join(s.root, "core")
+	if err := os.MkdirAll(filepath.Join(cachePath, "mcps"), 0o755); err != nil {
+		return err
+	}
+	lib := config.Library{Name: "core", URL: "https://example.com/core.git", CachePath: cachePath, Default: true}
+	return (config.FileStore{}).Save(s.configPath, config.Config{Libraries: []config.Library{lib}})
+}
+
+func (s *featureState) runAddInteractive() error {
+	command := cmd.NewRootCommand(context.Background())
+	command.SetArgs([]string{"--config", s.configPath, "--root", s.root, "add-interactive"})
+	// Name, Description, Version (blank -> default), Type (stdio), Command,
+	// Args, Env (blank ends), Tags.
+	command.SetIn(strings.NewReader("docs\nDocs server\n\nstdio\nnpx\n@acme/docs\n\ndocs\n"))
+	command.SetOut(&s.output)
+	command.SetErr(&s.output)
+	s.err = command.Execute()
+	return s.err
+}
+
+func (s *featureState) answeredDefinitionWritten() error {
+	if s.err != nil {
+		return s.err
+	}
+	data, err := os.ReadFile(filepath.Join(s.root, "core", "mcps", "docs.json"))
+	if err != nil {
+		return err
+	}
+	var def model.Definition
+	if err := json.Unmarshal(data, &def); err != nil {
+		return err
+	}
+	if def.Command != "npx" || def.Version != "0.1.0" || def.Description != "Docs server" {
+		return fmt.Errorf("definition = %+v", def)
+	}
+	return nil
 }
 
 func (s *featureState) registeredDefaultLibrary() error {
