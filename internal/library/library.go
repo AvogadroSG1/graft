@@ -328,6 +328,13 @@ func WriteDefinitionFile(lib config.Library, def model.Definition, overwrite boo
 	return path, nil
 }
 
+// DefinitionExists reports whether an MCP definition file already exists in the
+// library cache. It is used to preflight collisions before writing a batch.
+func DefinitionExists(lib config.Library, name string) bool {
+	_, err := os.Stat(filepath.Join(lib.CachePath, "mcps", name+".json"))
+	return err == nil
+}
+
 // ValidateMCPName returns an error if name contains path separators or would escape
 // the mcps/ directory via ".." traversal. Empty names are also rejected.
 func ValidateMCPName(name string) error {
@@ -373,26 +380,41 @@ func ImportFile(path string) ([]model.Definition, error) {
 	}
 }
 
+// claudeServerJSON is the wire shape of a single MCP server entry as it appears in
+// a Claude .mcp.json file, used by both file import and pasted-JSON parsing.
+type claudeServerJSON struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	Type    string            `json:"type"`
+	URL     string            `json:"url"`
+	Headers map[string]string `json:"headers"`
+}
+
+// parseClaudeServers decodes the wrapped {"mcpServers": {...}} form into a map of
+// server name to its raw fields. A document without an mcpServers object yields an
+// empty map (not an error) so callers can fall back to a bare single-server shape.
+func parseClaudeServers(data []byte) (map[string]claudeServerJSON, error) {
+	var doc struct {
+		MCPServers map[string]claudeServerJSON `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return doc.MCPServers, nil
+}
+
 func importClaude(path string) ([]model.Definition, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	var doc struct {
-		MCPServers map[string]struct {
-			Command string            `json:"command"`
-			Args    []string          `json:"args"`
-			Env     map[string]string `json:"env"`
-			Type    string            `json:"type"`
-			URL     string            `json:"url"`
-			Headers map[string]string `json:"headers"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
+	servers, err := parseClaudeServers(data)
+	if err != nil {
 		return nil, err
 	}
 	defs := []model.Definition{}
-	for name, server := range doc.MCPServers {
+	for name, server := range servers {
 		if err := ValidateMCPName(name); err != nil {
 			return nil, err
 		}
@@ -420,6 +442,142 @@ func importClaude(path string) ([]model.Definition, error) {
 	}
 	sortDefinitions(defs)
 	return defs, nil
+}
+
+// baseDefinition builds a tool-agnostic Definition from a raw server entry. It sets
+// no per-tool Adapters override and applies no redaction, so the result renders to
+// both Claude and Codex and is ready for ValidateDefinition / RedactSecrets.
+func baseDefinition(name string, server claudeServerJSON) model.Definition {
+	def := model.Definition{
+		Name:    name,
+		Version: "0.1.0",
+		Type:    server.Type,
+		Command: server.Command,
+		Args:    append([]string{}, server.Args...),
+		Env:     map[string]string{},
+		URL:     server.URL,
+		Headers: map[string]string{},
+	}
+	for key, value := range server.Env {
+		def.Env[key] = value
+	}
+	for key, value := range server.Headers {
+		def.Headers[key] = value
+	}
+	NormalizeDefinition(&def)
+	return def
+}
+
+// ParseMCPJSON parses pasted MCP JSON in either the wrapped {"mcpServers":{...}}
+// form (one definition per key) or a bare single-server object (name taken from a
+// top-level "name" field, else nameOverride). Returned definitions carry literal
+// values verbatim; callers apply RedactSecrets and ValidateDefinition.
+func ParseMCPJSON(data []byte, nameOverride string) ([]model.Definition, error) {
+	servers, err := parseClaudeServers(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse MCP JSON: %w", err)
+	}
+	if len(servers) > 0 {
+		defs := make([]model.Definition, 0, len(servers))
+		for name, server := range servers {
+			defs = append(defs, baseDefinition(name, server))
+		}
+		sortDefinitions(defs)
+		return defs, nil
+	}
+	var bare struct {
+		Name string `json:"name"`
+		claudeServerJSON
+	}
+	if err := json.Unmarshal(data, &bare); err != nil {
+		return nil, fmt.Errorf("parse MCP JSON: %w", err)
+	}
+	name := bare.Name
+	if name == "" {
+		name = nameOverride
+	}
+	if name == "" {
+		return nil, fmt.Errorf("MCP name required: add a positional name or a \"name\" field to the JSON")
+	}
+	return []model.Definition{baseDefinition(name, bare.claudeServerJSON)}, nil
+}
+
+// ValidateDefinition rejects definitions that cannot produce a usable MCP entry:
+// an invalid name, an unknown transport type, a stdio server without a command, or
+// a remote (http/sse) server without a url.
+func ValidateDefinition(def model.Definition) error {
+	if err := ValidateMCPName(def.Name); err != nil {
+		return err
+	}
+	switch def.Type {
+	case "", "stdio":
+		if def.Command == "" {
+			return fmt.Errorf("stdio MCP %q requires a command", def.Name)
+		}
+	case "http", "sse":
+		if def.URL == "" {
+			return fmt.Errorf("%s MCP %q requires a url", def.Type, def.Name)
+		}
+	default:
+		return fmt.Errorf("MCP %q has unknown type %q (want stdio, http, or sse)", def.Name, def.Type)
+	}
+	return nil
+}
+
+// IsPlaceholder reports whether a value is a ${...} reference placeholder.
+// The length guard rejects the degenerate "${}".
+func IsPlaceholder(value string) bool {
+	return strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") && len(value) > 3
+}
+
+// PlaceholderName returns the variable name inside a ${...} placeholder, or
+// the empty string when value is not a placeholder.
+func PlaceholderName(value string) string {
+	if !IsPlaceholder(value) {
+		return ""
+	}
+	return value[2 : len(value)-1]
+}
+
+// RedactSecrets rewrites literal secret-looking env/header values into ${KEY}
+// placeholders, leaves existing ${...} references and ordinary literals untouched,
+// and returns the sorted list of placeholder variable names it created.
+func RedactSecrets(def *model.Definition) []string {
+	redacted := map[string]bool{}
+	redactMap := func(values map[string]string) {
+		for key, value := range values {
+			if IsPlaceholder(value) {
+				continue
+			}
+			if IsSensitiveField(key, value) {
+				values[key] = "${" + key + "}"
+				redacted[key] = true
+			}
+		}
+	}
+	redactMap(def.Env)
+	redactMap(def.Headers)
+	names := make([]string, 0, len(redacted))
+	for name := range redacted {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// IsSensitiveField reports whether an env or header key/value pair looks
+// credential-bearing and should be redacted into a ${KEY} placeholder.
+func IsSensitiveField(key, value string) bool {
+	upperKey := strings.ToUpper(key)
+	upperValue := strings.ToUpper(value)
+	return strings.Contains(upperKey, "TOKEN") ||
+		strings.Contains(upperKey, "SECRET") ||
+		strings.Contains(upperKey, "KEY") ||
+		strings.Contains(upperKey, "PASSWORD") ||
+		strings.Contains(upperKey, "CREDENTIAL") ||
+		upperKey == "AUTHORIZATION" ||
+		upperKey == "BEARER_TOKEN_ENV_VAR" ||
+		strings.Contains(upperValue, "BEARER ")
 }
 
 func importCodex(path string) ([]model.Definition, error) {
@@ -470,7 +628,7 @@ func importCodex(path string) ([]model.Definition, error) {
 func placeholderMap(source map[string]string) map[string]string {
 	next := map[string]string{}
 	for key, value := range source {
-		if strings.HasPrefix(value, "${") && strings.HasSuffix(value, "}") {
+		if IsPlaceholder(value) {
 			next[key] = value
 			continue
 		}

@@ -36,6 +36,20 @@ type Options struct {
 	PinConfirmation string
 	// ConfirmPinMismatch prompts for confirmation after a concrete pin mismatch is known.
 	ConfirmPinMismatch func(diff string) (string, error)
+	// Placeholders maps mcp name to user-resolved ${VAR} env/header overrides.
+	// MCPs present here bypass the credential auth gate because the user has
+	// explicitly chosen reference names; no literal secrets are written.
+	Placeholders map[string]model.PlaceholderOverrides
+	// Prefetched supplies already-fetched definitions keyed by "library/name",
+	// letting callers that have inspected definitions (e.g. to discover
+	// placeholders) avoid a redundant second fetch.
+	Prefetched map[string]DefinitionResult
+}
+
+// DefinitionResult pairs a definition with the hash of its on-disk JSON.
+type DefinitionResult struct {
+	Definition model.Definition
+	Hash       string
 }
 
 // Apply iterates over the MCPs in the lock file, fetches each definition from the library,
@@ -77,11 +91,18 @@ func ApplyWithOptions(lk lock.Lock, cfg config.Config, client library.Client, ad
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: library %q is not registered", mcp.Name, mcp.Library))
 			continue
 		}
-		def, hash, err := client.Definition(lib, mcp.Name)
-		if err != nil {
-			result.Failed = append(result.Failed, mcp.Name)
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: definition: %v", mcp.Name, err))
-			continue
+		var def model.Definition
+		var hash string
+		if pf, ok := opts.Prefetched[key]; ok {
+			def, hash = pf.Definition, pf.Hash
+		} else {
+			var err error
+			def, hash, err = client.Definition(lib, mcp.Name)
+			if err != nil {
+				result.Failed = append(result.Failed, mcp.Name)
+				result.Errors = append(result.Errors, fmt.Sprintf("%s: definition: %v", mcp.Name, err))
+				continue
+			}
 		}
 		if hash == mcp.DefinitionHash {
 			result.Skipped = append(result.Skipped, mcp.Name)
@@ -104,10 +125,16 @@ func ApplyWithOptions(lk lock.Lock, cfg config.Config, client library.Client, ad
 			result.Skipped = append(result.Skipped, mcp.Name)
 			continue
 		}
-		if warning := AuthWarningForTarget(def, mcp.Target); warning != "" {
-			result.Warnings = append(result.Warnings, warning)
-			result.Skipped = append(result.Skipped, mcp.Name)
-			continue
+		override, resolved := opts.Placeholders[mcp.Name]
+		if resolved {
+			def = applyPlaceholderOverrides(def, mcp.Target, override)
+		}
+		if !resolved {
+			if warning := AuthWarningForTarget(def, mcp.Target); warning != "" {
+				result.Warnings = append(result.Warnings, warning)
+				result.Skipped = append(result.Skipped, mcp.Name)
+				continue
+			}
 		}
 		if def.Pin.Runtime != "" {
 			pinned, warnings, err := enforcePinForTargets(def, mcp.Target, opts)
@@ -191,18 +218,44 @@ func AuthWarningForTarget(def model.Definition, target string) string {
 	return ""
 }
 
+// applyPlaceholderOverrides rewrites resolved ${VAR} reference names onto a
+// definition's env/header placeholders. It only overwrites keys that already
+// exist, setting both the base maps and any per-target adapter override map that
+// carries the key, so the merged Definition.Adapter result renders the chosen
+// reference for every requested target. Non-${...} override values are ignored
+// so a caller can never turn this path into a way to write literal secrets.
+func applyPlaceholderOverrides(def model.Definition, target string, ov model.PlaceholderOverrides) model.Definition {
+	targets := renderTargetList(target)
+	apply := func(base map[string]string, pick func(model.AdapterConfig) map[string]string, overrides map[string]string) {
+		for key, value := range overrides {
+			if !library.IsPlaceholder(value) {
+				continue
+			}
+			if base != nil {
+				if _, ok := base[key]; ok {
+					base[key] = value
+				}
+			}
+			for _, name := range targets {
+				adapter, ok := def.Adapters[name]
+				if !ok {
+					continue
+				}
+				m := pick(adapter)
+				if _, ok := m[key]; ok {
+					m[key] = value
+				}
+			}
+		}
+	}
+	apply(def.Env, func(a model.AdapterConfig) map[string]string { return a.Env }, ov.Env)
+	apply(def.Headers, func(a model.AdapterConfig) map[string]string { return a.Headers }, ov.Headers)
+	return def
+}
+
 func credentialMapHasSensitiveFields(values map[string]string) bool {
 	for key, value := range values {
-		upperKey := strings.ToUpper(key)
-		upperValue := strings.ToUpper(value)
-		if strings.Contains(upperKey, "TOKEN") ||
-			strings.Contains(upperKey, "SECRET") ||
-			strings.Contains(upperKey, "KEY") ||
-			strings.Contains(upperKey, "PASSWORD") ||
-			strings.Contains(upperKey, "CREDENTIAL") ||
-			upperKey == "AUTHORIZATION" ||
-			upperKey == "BEARER_TOKEN_ENV_VAR" ||
-			strings.Contains(upperValue, "BEARER ") {
+		if library.IsSensitiveField(key, value) {
 			return true
 		}
 	}
