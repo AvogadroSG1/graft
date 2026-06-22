@@ -23,6 +23,3 @@ if command -v bd >/dev/null 2>&1; then
 fi
 # --- END BEADS INTEGRATION v1.0.3 ---
 
-# CALM pre-commit hook (sidecar)
-_bd_hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-bash "$_bd_hook_dir/calm-pre-commit" "$@"
