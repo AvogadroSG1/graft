@@ -19,3 +19,8 @@ Feature: Import and authoring behaviors
     When I run graft mcp push --yes
     Then graft recomputes the index and reports the commit flow
 
+  Scenario: Interactive add wizard
+    Given a default library for authoring
+    When I run graft add-interactive and answer the prompts
+    Then the answered MCP definition is written
+
