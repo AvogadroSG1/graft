@@ -90,11 +90,13 @@ linters (`.golangci.yml`): `bodyclose`, `errcheck`, `govet`, `ineffassign`,
 
 This repo installs git/Claude hooks under `.beads/hooks/` that enforce **CALM
 fitness functions** (`.calm/config.json`). Enforcement mode is `block`, and
-**cyclomatic-complexity** is the active gate — the `pre-commit` and
-`stack-fitness-functions-git-guard` hooks will **reject commits** that introduce
-complexity violations. If a commit is blocked, refactor to reduce complexity
-(extract helpers, flatten control flow) rather than bypassing the hook. Keep
-functions small and single-purpose.
+**cyclomatic-complexity** is the active gate. The `stack-fitness-functions-pre-commit`
+hook runs the complexity validation and **rejects commits** that introduce
+violations; the `stack-fitness-functions-git-guard` PreToolUse hook separately
+blocks attempts to bypass enforcement (e.g. `git commit --no-verify`/`-n`). If a
+commit is blocked, refactor to reduce complexity (extract helpers, flatten
+control flow) rather than bypassing the hook. Keep functions small and
+single-purpose.
 
 ## Architecture Overview
 
@@ -151,7 +153,9 @@ docs/               testing.md and other docs
    `.mcp.json` + `.codex/config.toml` atomically.
 4. `graft status` compares `graft.lock` against rendered output and reports one
    of: `uninitialized`, `initialized`, `configured`, `drifted`, `pinmismatch`,
-   `pending_input`, `unknown_library`. `--quiet` exits non-zero on drift (CI).
+   `pending_input`, `unknown_library`. `--quiet` exits non-zero for any state
+   other than `configured` (not just drift — also `uninitialized`,
+   `initialized`, etc.), which is useful as a CI gate.
 
 ## Conventions & Patterns
 
